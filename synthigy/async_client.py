@@ -681,6 +681,7 @@ class AsyncWatchMultiplexer:
         self._opened = asyncio.Event()
         self._flush_lock = asyncio.Lock()
         self._flush_pending = None
+        self._flush_dirty = False
         self._last_union = None
         self.resolver = AsyncSchemaResolver(client) if schema else None
 
@@ -703,7 +704,11 @@ class AsyncWatchMultiplexer:
 
     def _schedule_flush(self):
         """Detached, COALESCED flush: N rapid interest changes (e.g. a
-        burst of stream closes) fold into one pending task, not N."""
+        burst of stream closes) fold into one pending task, not N. The
+        dirty flag makes a running flush go round again — it may already
+        have snapshotted the watch set, and the tail change must not be
+        the one that never reaches the server."""
+        self._flush_dirty = True
         if self._flush_pending is None or self._flush_pending.done():
             self._flush_pending = asyncio.ensure_future(self._flush_safe())
 
@@ -799,11 +804,15 @@ class AsyncWatchMultiplexer:
             delay = min(delay * 2, _MAX_BACKOFF)
 
     async def _flush_safe(self):
-        try:
-            await self._flush()
-        except SynthigyError as e:
-            self._fan_out_sentinel({"type": "subscription/rejected",
-                                    "reason": str(e), "records": []})
+        while True:
+            self._flush_dirty = False
+            try:
+                await self._flush()
+            except SynthigyError as e:
+                self._fan_out_sentinel({"type": "subscription/rejected",
+                                        "reason": str(e), "records": []})
+            if not self._flush_dirty:
+                return
 
     async def _flush(self):
         """POST the union of every open watch's interest (full set-replace

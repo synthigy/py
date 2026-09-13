@@ -19,4 +19,9 @@ First public release.
   plus the IAM-filtered schema, with an offline drift gate (`check`).
 - `py.typed`: annotations are visible to downstream type-checkers.
 
+### Fixed
+- A watch closed while the previous subscription flush was still in flight
+  could leave the server's union stale — coalescing skipped the tail change.
+  A flush now re-runs when interest moved under it.
+
 Zero runtime dependencies — standard library only. Python ≥ 3.10.
