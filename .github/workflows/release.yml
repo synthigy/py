@@ -1,0 +1,37 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --with pytest --python ${{ matrix.python }} python -m pytest tests -q
+
+  publish:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write        # PyPI trusted publishing — no API token needed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Tag must match pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          proj=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          [ "$tag" = "$proj" ] || { echo "tag $tag != pyproject $proj"; exit 1; }
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1

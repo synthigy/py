@@ -1,0 +1,398 @@
+{
+  "id-key": "xid",
+  "version": "0.1.1",
+  "entities": {
+    "movie": {
+      "name": "Movie",
+      "xid": "CuquTMuTdnWZUP6GxurJqM",
+      "attributes": {
+        "release_year": {
+          "type": "int"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "relations": {
+        "genres": {
+          "to": "movie_genre",
+          "cardinality": "many"
+        },
+        "movie_ratings": {
+          "to": "user_rating",
+          "cardinality": "many"
+        },
+        "actors": {
+          "to": "movie_actor",
+          "cardinality": "many"
+        }
+      },
+      "constraints": {
+        "unique": [
+          [
+            "xid"
+          ]
+        ]
+      },
+      "xids": {
+        "attributes": {
+          "release_year": "LAUjKP9QWDSGGgW4krsYX5",
+          "title": "JAN1Rh8qEA2XVTyAx5m4bC"
+        },
+        "relations": {
+          "genres": "1A3to8GjRsQyTVLuNURmRK",
+          "movie_ratings": "19gqxz9i4AxhVSqJ2qYe92",
+          "actors": "6WruaMFMb94pN1D7BxmFVM"
+        }
+      }
+    },
+    "movie_genre": {
+      "name": "Movie Genre",
+      "xid": "FHjMsfeB3c38CpgRoper49",
+      "attributes": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "relations": {
+        "movies": {
+          "to": "movie",
+          "cardinality": "many"
+        }
+      },
+      "constraints": {
+        "unique": [
+          [
+            "xid"
+          ],
+          [
+            "name"
+          ]
+        ]
+      },
+      "xids": {
+        "attributes": {
+          "name": "7AXRUXxMyA4KaGaFW6L5ud"
+        },
+        "relations": {
+          "movies": "1A3to8GjRsQyTVLuNURmRK"
+        }
+      }
+    },
+    "movie_actor": {
+      "name": "Movie Actor",
+      "xid": "WwVbcZzGnKjJaKtdWiAqmw",
+      "attributes": {
+        "name": {
+          "type": "string"
+        },
+        "nationality": {
+          "type": "string"
+        },
+        "birth_year": {
+          "type": "int"
+        }
+      },
+      "relations": {
+        "movies": {
+          "to": "movie",
+          "cardinality": "many"
+        }
+      },
+      "constraints": {
+        "unique": [
+          [
+            "xid"
+          ],
+          [
+            "name"
+          ]
+        ]
+      },
+      "xids": {
+        "attributes": {
+          "name": "B636jCsxY3k11EuJYqHbG8",
+          "nationality": "8rHuaUS5zRxSCnWBUQo3dB",
+          "birth_year": "KgR8YikntHKFV7qfaXoFoR"
+        },
+        "relations": {
+          "movies": "6WruaMFMb94pN1D7BxmFVM"
+        }
+      }
+    },
+    "user_rating": {
+      "name": "User Rating",
+      "xid": "9H1gEBp1Jzv55tTtVjBNhJ",
+      "attributes": {
+        "value": {
+          "type": "float",
+          "nullable": false
+        },
+        "review": {
+          "type": "string"
+        },
+        "modified_on": {
+          "type": "timestamp"
+        },
+        "created_on": {
+          "type": "timestamp"
+        },
+        "modified_by": {
+          "type": "user"
+        },
+        "created_by": {
+          "type": "user"
+        }
+      },
+      "relations": {
+        "modified_by": {
+          "to": "user",
+          "cardinality": "one"
+        },
+        "user": {
+          "to": "movie_user",
+          "cardinality": "one"
+        },
+        "movie": {
+          "to": "movie",
+          "cardinality": "one"
+        },
+        "created_by": {
+          "to": "user",
+          "cardinality": "one"
+        }
+      },
+      "constraints": {
+        "unique": [
+          [
+            "xid"
+          ]
+        ]
+      },
+      "xids": {
+        "attributes": {
+          "value": "R2phzFogYnCFhAAgsNeUgE",
+          "review": "H3BmibyrxMeRXfaC2tPvbu",
+          "modified_on": "2zYMxy6QNcj1AjyUVbvaSx",
+          "created_on": "Qjn34UmWpbJJM5MNMmGYUP",
+          "modified_by": "DS76HrMJk3MuvY71x2izs2",
+          "created_by": "X38ifTdodUBRYe8LeJNCy5"
+        },
+        "relations": {
+          "modified_by": "DS76HrMJk3MuvY71x2izs2",
+          "user": "ViZNkqS82Y19dG7wvsvVhW",
+          "movie": "19gqxz9i4AxhVSqJ2qYe92",
+          "created_by": "X38ifTdodUBRYe8LeJNCy5"
+        }
+      }
+    },
+    "user": {
+      "name": "User",
+      "xid": "WN5xU8Do5pcdhTkxXvEYwt",
+      "attributes": {
+        "priority": {
+          "type": "int"
+        },
+        "head_of_department": {
+          "type": "boolean"
+        },
+        "settings": {
+          "type": "json"
+        },
+        "cookie": {
+          "type": "string"
+        },
+        "created_by": {
+          "type": "user"
+        },
+        "name": {
+          "type": "string"
+        },
+        "avatar": {
+          "type": "json"
+        },
+        "type": {
+          "type": "enum",
+          "enum": [
+            "PERSON",
+            "SERVICE",
+            "SECRET",
+            "ROBOT",
+            "OAUTH_CLIENT"
+          ]
+        },
+        "modified_on": {
+          "type": "timestamp"
+        },
+        "password": {
+          "type": "hashed",
+          "write-only": true
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "modified_by": {
+          "type": "user"
+        },
+        "out_of_office": {
+          "type": "boolean"
+        },
+        "created_on": {
+          "type": "timestamp"
+        }
+      },
+      "relations": {
+        "notification_preferences": {
+          "to": "notification_preference",
+          "cardinality": "many"
+        },
+        "owner": {
+          "to": "project",
+          "cardinality": "one"
+        },
+        "user_profile": {
+          "to": "user_profile",
+          "cardinality": "one"
+        },
+        "authorized_clients": {
+          "to": "o_auth_client",
+          "cardinality": "many"
+        },
+        "loggers": {
+          "to": "app_logger",
+          "cardinality": "many"
+        },
+        "person_info": {
+          "to": "person_info",
+          "cardinality": "one"
+        },
+        "company_section": {
+          "to": "company_section",
+          "cardinality": "one"
+        },
+        "can_read_folder": {
+          "to": "folder",
+          "cardinality": "many"
+        },
+        "sessions": {
+          "to": "o_auth_session",
+          "cardinality": "many"
+        },
+        "notifications": {
+          "to": "notification",
+          "cardinality": "many"
+        },
+        "chat_groups": {
+          "to": "user_group",
+          "cardinality": "many"
+        },
+        "external_identities": {
+          "to": "external_identity",
+          "cardinality": "many"
+        },
+        "created_by": {
+          "to": "user",
+          "cardinality": "one"
+        },
+        "approval_records": {
+          "to": "approval_record",
+          "cardinality": "many"
+        },
+        "robot_repo": {
+          "to": "git_repository",
+          "cardinality": "one"
+        },
+        "approvals": {
+          "to": "approval",
+          "cardinality": "many"
+        },
+        "installations": {
+          "to": "service_location",
+          "cardinality": "many"
+        },
+        "can_write_folder": {
+          "to": "folder",
+          "cardinality": "many"
+        },
+        "quick_filters": {
+          "to": "quick_filter",
+          "cardinality": "many"
+        },
+        "projects": {
+          "to": "project",
+          "cardinality": "many"
+        },
+        "modified_by": {
+          "to": "user",
+          "cardinality": "one"
+        },
+        "can_delete_folder": {
+          "to": "folder",
+          "cardinality": "many"
+        },
+        "roles": {
+          "to": "user_role",
+          "cardinality": "many"
+        },
+        "groups": {
+          "to": "user_group",
+          "cardinality": "many"
+        }
+      },
+      "constraints": {
+        "unique": [
+          [
+            "xid"
+          ],
+          [
+            "name"
+          ]
+        ]
+      },
+      "xids": {
+        "attributes": {
+          "priority": "EGMoFj5ujdtg5MK5Cam69c",
+          "head_of_department": "BsjnSbBc6tsqQEfoNDzYJQ",
+          "settings": "E87AcJvpzGHgGx2mSdqCew",
+          "cookie": "29yk7cAYaXw7qo4hwRSMoP",
+          "created_by": "9V1Zy8uXzCEYKjRCeKMXF6",
+          "name": "Px3Zdh6y7teZiRFqVfbwEV",
+          "avatar": "CTSSqycideFsT9NvshFgZy",
+          "type": "GPXmNJ4oBbrfeGtGyLxSeA",
+          "modified_on": "WX4QDsW4qa2Ac8vs7iAj99",
+          "password": "6UZ37fazSUWp4XwqA2CiFg",
+          "active": "AFMBjUGd4Ewn4syUeSeBfj",
+          "modified_by": "GsPVVZbWAWtgEQSq2k9Dpd",
+          "out_of_office": "LTjWU51YWEGsxR7WStk7Ku",
+          "created_on": "B6Yu2wBMjWfs1FX58uQrCg"
+        },
+        "relations": {
+          "notification_preferences": "JG6npZTiUFfHjY2SJQrMSK",
+          "owner": "XXKRrr2GsBnDSVmiGoh8Ln",
+          "user_profile": "46FP9sN8A8xMarwY4Ad5DW",
+          "authorized_clients": "TYVoHhUnDf3KN2LmSp9yfP",
+          "loggers": "4D4kSDfy8dknMG9UUPjubZ",
+          "person_info": "BfRjYxqSLbdbGXJNRAnyfH",
+          "company_section": "YS8fM6r2y2jow3vHT1hELq",
+          "can_read_folder": "5CRRt4afDgTn8Wi7DgBwf8",
+          "sessions": "CczZUuxrDsSxdvg8WSvQwy",
+          "notifications": "9DrMnMPe23vsoP4tavfZYs",
+          "chat_groups": "WuHbQSVwBt7BhGBphBWpz5",
+          "external_identities": "8EVN8tqyNBSBUzmmG4m8WD",
+          "created_by": "9V1Zy8uXzCEYKjRCeKMXF6",
+          "approval_records": "WfXh1PNY7ULXNnHryWt5um",
+          "robot_repo": "D1LmYmzqktPo5JJCyKaQq4",
+          "approvals": "X2AC9QyUoXNXfXhVEBrWmh",
+          "installations": "6ViTvNM6NP7JbT5hrQkxK8",
+          "can_write_folder": "41e8GqLS9nz6b9Vu9HzuFD",
+          "quick_filters": "DTcUGRCfWWnazBvUwHPZcr",
+          "projects": "NdJ7BfLpf8xdknCzfaFtDE",
+          "modified_by": "GsPVVZbWAWtgEQSq2k9Dpd",
+          "can_delete_folder": "VEoSL1SgcH4pnTqmJNMAwC",
+          "roles": "9hMX1U9GJWbrZLgarrfnaG",
+          "groups": "NWwVJG6ympZP99zoS2E7F8"
+        }
+      }
+    }
+  }
+}

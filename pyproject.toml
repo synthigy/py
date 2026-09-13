@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "synthigy"
+version = "0.1.0"
+description = "Synthigy /data client SDK — zero-dependency, stdlib only"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Robert Geršak" }]
+keywords = ["synthigy", "sdk", "dataset", "iam", "crud", "client", "sse", "asyncio", "xsql"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Framework :: AsyncIO",
+  "Topic :: Database :: Front-Ends",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/synthigy/synthigy"
+Repository = "https://github.com/synthigy/py"
+Issues = "https://github.com/synthigy/py/issues"
+
+[project.scripts]
+synthigy-gen = "synthigy.codegen:main"
+
+[tool.setuptools.packages.find]
+include = ["synthigy*"]
+
+[tool.setuptools.package-data]
+synthigy = ["py.typed"]

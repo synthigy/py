@@ -1,0 +1,64 @@
+@search list
+@description "Movies newest-first with rating/actor counts, average rating and genres.
+Filter by title with ?q (ilike) and minimum release year with ?since."
+@watch
+movie (release_year > ?since:int=1980, limit ?limit:int=20, offset ?offset:int=0, order by release_year desc)
+  xid
+  title (ilike ?q:string="%")
+  release_year
+  _count
+    ratings:movie_ratings
+    actors:actors
+  _agg
+    ratings:movie_ratings
+      value: avg
+  ->genres
+    xid
+    name
+
+@get detail
+@description "One movie by xid — ratings with reviewer, plus genres and cast."
+@watch
+movie (xid = ?xid:string)
+  xid
+  title
+  release_year
+  ->movie_ratings
+    xid
+    value
+    review
+    ->created_by
+      xid
+      name
+  ->genres
+    xid
+    name
+  ->actors
+    xid
+    name
+    birth_year
+
+@sql-template count
+@description "Movie count under the same ?since / ?q filters the list uses."
+@namespace movie
+@returns total:int
+SELECT count(*) AS total FROM {movie}
+WHERE release_year > ?since:int=1995 AND title ILIKE ?q:string="%"
+
+@sql-template stats
+@description "Dashboard headline numbers."
+@namespace dashboard
+@watch movie, user_rating, movie_actor
+@returns total_movies:int, total_ratings:int, avg_rating:float?, total_actors:int
+-- One CTE per entity, not scalar subqueries: RLS guards are injected per
+-- CTE scope, so each aggregate is scoped to what the caller may read.
+WITH m  AS (SELECT count(*) AS n FROM {movie}),
+     r  AS (SELECT count(*) AS n, avg({user_rating.value}) AS avg_value FROM {user_rating}),
+     ma AS (SELECT count(*) AS n FROM {movie_actor})
+SELECT m.n          AS total_movies,
+       r.n          AS total_ratings,
+       r.avg_value  AS avg_rating,
+       ma.n         AS total_actors
+FROM m, r, ma
+
+@batch overview: list stats
