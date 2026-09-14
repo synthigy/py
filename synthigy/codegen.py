@@ -717,6 +717,9 @@ def cmd_gen(args):
     out = Path(args.out) if args.out else xsql_path.with_name(xsql_path.stem + "_gen.py")
     if out.is_dir():
         out = out / (xsql_path.stem + "_gen.py")
+    # The output directory is normally gitignored, so on a fresh clone it does
+    # not exist yet and write_text would raise FileNotFoundError.
+    out.parent.mkdir(parents=True, exist_ok=True)
     code = render(ir, schema, writes=args.writes, input_name=xsql_path.name)
     out.write_text(code)
 

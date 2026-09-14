@@ -263,8 +263,9 @@ Empty or unknown op kinds in a saved IR are a hard error (a stale IR is
 never silently emitted from), and data keys stay snake_case verbatim —
 Python native is server native, no casing transform exists.
 
-A committed end-to-end example lives in `codegen-example/`
-(`movies.xsql` → `movies.ir.json` + `schema.json` → `movies_gen.py`).
+An end-to-end example lives in `codegen-example/`. It ships only
+`movies.xsql`; you run `pull` and `gen` to produce `schema.json`,
+`movies.ir.json` and `movies_gen.py` yourself. See its README.
 
 ## Tests
 

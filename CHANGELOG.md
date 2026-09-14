@@ -3,7 +3,14 @@
 All notable changes to `synthigy` (PyPI). Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
-## 0.1.0 — unreleased
+## 0.1.1
+
+### Fixed
+- **`gen --out` into a directory that did not exist raised `FileNotFoundError`.**
+  The output directory is normally gitignored, so the first generation after a
+  fresh clone hit it. The generator now creates it.
+
+## 0.1.0
 
 First public release.
 
