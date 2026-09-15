@@ -1,6 +1,0 @@
-# datastar-music demo dependencies.
-# The Synthigy SDK itself is stdlib-only and installed from the repo:
-#     pip install -e ../..
-fastapi>=0.110
-uvicorn[standard]>=0.29
-datastar-py>=1.0.2

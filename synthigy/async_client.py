@@ -66,6 +66,17 @@ from .events import (
 from .selection import normalize_selection
 from .util import generate_request_id, now_iso, xsql_document
 
+PLATFORM_AUDIENCE = "https://synthigy.com"
+"""The platform API this SDK is a client of.
+
+``/data``, ``/schema``, ``/history``, ``/logs`` and subscriptions all require a
+token bound to it. It names the API, never a deployment, so it is the same
+string on localhost and in production — which is why it is a constant rather
+than something every caller configures. Minting a token for some OTHER API is a
+per-call argument, not a property of the client.
+"""
+
+
 _INITIAL_BACKOFF = 1.0
 _MAX_BACKOFF = 30.0
 
@@ -1384,7 +1395,13 @@ class AsyncClient:
         self._keep_alive = keep_alive
         self._on_op = on_op
         self._pool = _AsyncPool(timeout=timeout)
-        self._default_audience = audience or os.environ.get("SYNTHIGY_AUDIENCE")
+        # This SDK is the client for the platform API, so that is what it mints
+        # for. Nothing to configure, and nowhere to look the value up if there
+        # were: the server does not advertise it in discovery. The env var stays
+        # only as an escape hatch.
+        self._default_audience = (audience
+                                  or os.environ.get("SYNTHIGY_AUDIENCE")
+                                  or PLATFORM_AUDIENCE)
 
         # Token source resolution — PLAN-EXEC-IDENTITY.md step 3, in order:
         # caller-supplied (code) -> client credentials (code) ->
@@ -1642,6 +1659,18 @@ class AsyncClient:
         if raw:
             return flat
         return compose_tree(flat, on, root_id=root, children_key=children_key)
+
+    async def deploy(self, export_contents, **opts):
+        """Deploy a dataset version from a modeler export. Pass the export
+        file's contents verbatim — the server decodes it. Requires
+        dataset:deploy. The ack carries the dataset xid `destroy` takes."""
+        return await self._one({"op": "deploy", "data": export_contents}, **opts)
+
+    async def destroy(self, dataset_xid, **opts):
+        """Destroy a dataset — every version, table and row. Requires
+        dataset:delete. Idempotent."""
+        return await self._one(
+            {"op": "delete", "entity": "dataset", "data": {"xid": dataset_xid}}, **opts)
 
     async def deployed_model(self, **opts):
         return await self._one({"op": "deployed-model"}, **opts)

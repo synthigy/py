@@ -28,8 +28,9 @@ Async-first (BFFs, FastAPI/uvicorn services):
     rows = await synthigy.aclient().search("User", ..., acting_as=user_xid)
 """
 
+
 from . import ops  # noqa: F401
-from .async_client import AsyncClient  # noqa: F401
+from .async_client import AsyncClient, PLATFORM_AUDIENCE  # noqa: F401
 from .compose import compose_forest, compose_tree  # noqa: F401
 from .errors import SynthigyError  # noqa: F401
 from .facade import Client
@@ -135,6 +136,8 @@ def schema(*a, **kw): return _dflt().schema(*a, **kw)
 def lint(*a, **kw): return _dflt().lint(*a, **kw)
 def onboard(*a, **kw): return _dflt().onboard(*a, **kw)
 def onboard_complete(*a, **kw): return _dflt().onboard_complete(*a, **kw)
+def deploy(*a, **kw): return _dflt().deploy(*a, **kw)
+def destroy(*a, **kw): return _dflt().destroy(*a, **kw)
 def deployed_model(*a, **kw): return _dflt().deployed_model(*a, **kw)
 def runtime_model(*a, **kw): return _dflt().runtime_model(*a, **kw)
 def token(*a, **kw): return _dflt().token(*a, **kw)

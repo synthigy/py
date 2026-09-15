@@ -1,3 +1,0 @@
-# Codegen output — regenerate with:
-#   python -m synthigy.codegen gen xsql/packages.xsql --out generated/packages_gen.py
-*_gen.py

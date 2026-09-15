@@ -206,6 +206,22 @@ class TestEnvelope(ClientTestCase):
         c.delete("User", {"xid": "u-1"})
         self.assertEqual(self.last_data_body()["operations"][0]["op"], "delete")
 
+    def test_deploy_posts_export_contents_verbatim(self):
+        self.srv.route("/data", (200, ok_results(
+            {"deployed": True, "version": "0.3", "dataset": "ds-1"})))
+        c = self.static_client()
+        ack = c.deploy('{"~:xid":"v-1"}')
+        self.assertEqual(ack, {"deployed": True, "version": "0.3", "dataset": "ds-1"})
+        op = self.last_data_body()["operations"][0]
+        self.assertEqual(op, {"op": "deploy", "data": '{"~:xid":"v-1"}'})
+
+    def test_destroy_is_delete_on_dataset_by_xid(self):
+        self.srv.route("/data", (200, ok_results(True)))
+        c = self.static_client()
+        self.assertTrue(c.destroy("ds-1"))
+        op = self.last_data_body()["operations"][0]
+        self.assertEqual(op, {"op": "delete", "entity": "dataset", "data": {"xid": "ds-1"}})
+
     def test_exec_batch_order(self):
         self.srv.route("/data", (200, ok_results({"xid": "a"}, True)))
         c = self.static_client()

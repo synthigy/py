@@ -69,6 +69,14 @@ def query(xsql, params=None, op="search"):
     return o
 
 
+def deploy(export_contents):
+    return {"op": "deploy", "data": export_contents}
+
+
+def destroy(dataset_xid):
+    return {"op": "delete", "entity": "dataset", "data": {"xid": dataset_xid}}
+
+
 def deployed_model():
     return {"op": "deployed-model"}
 

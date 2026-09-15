@@ -185,6 +185,12 @@ class Client:
     def get_tree(self, *a, **kw):
         return self._call("get_tree", *a, **kw)
 
+    def deploy(self, *a, **kw):
+        return self._call("deploy", *a, **kw)
+
+    def destroy(self, *a, **kw):
+        return self._call("destroy", *a, **kw)
+
     def deployed_model(self, **kw):
         return self._call("deployed_model", **kw)
 
