@@ -318,6 +318,28 @@ class TestAuth(ClientTestCase):
         with self.assertRaises(SynthigyError) as ctx:
             Client(self.srv.endpoint)
         self.assertEqual(ctx.exception.code, "NO_TOKEN")
+        self.assertEqual(ctx.exception.category, "auth")
+        self.assertFalse(ctx.exception.retryable)
+
+    def test_token_refusal_is_typed(self):
+        self.srv.route("/oauth/token", (400, {
+            "error": "invalid_target",
+            "error_description": "Client is not authorized for audience x"}))
+        c = Client(self.srv.endpoint, client_id="id", client_secret="s")
+        with self.assertRaises(SynthigyError) as ctx:
+            c.search("User", None, None)
+        e = ctx.exception
+        self.assertEqual((e.code, e.status, e.retryable), ("UNAUTHORIZED", 400, False))
+        self.assertEqual(e.details["error"], "invalid_target")
+        self.assertIn("not authorized for audience", e.message)
+
+    def test_token_endpoint_unreachable_is_network_error(self):
+        c = Client("http://127.0.0.1:9", client_id="id", client_secret="s",
+                   timeout=2)
+        with self.assertRaises(SynthigyError) as ctx:
+            c.search("User", None, None)
+        self.assertEqual(ctx.exception.code, "NETWORK_ERROR")
+        self.assertTrue(ctx.exception.retryable)
 
     def test_static_empty_token_no_auth_header(self):
         self.srv.route("/data", (200, ok_results([])))
@@ -396,6 +418,29 @@ class TestIntrospection(ClientTestCase):
         self.assertEqual(out, [{"line": 1}])
         body = json.loads(self.srv.requests_to("/lint")[-1]["body"])
         self.assertEqual(body["entity"], "user")
+
+    def test_compile_returns_wire_op(self):
+        self.srv.route("/compile", (200, {"results": [
+            {"ok": True, "operation": {"op": "search", "entity": "movie",
+                                       "args": {"_limit": 2},
+                                       "selections": {"title": None}}}]}))
+        op = self.static_client().compile("movie (limit ?n:int=5)\n  title\n",
+                                          {"n": 2})
+        self.assertEqual(op["op"], "search")
+        self.assertEqual(op["args"], {"_limit": 2})
+        sent = json.loads(self.srv.requests_to("/compile")[-1]["body"])
+        self.assertEqual(len(sent["operations"]), 1)
+        self.assertEqual(sent["operations"][0]["op"], "xsql")
+        self.assertTrue(sent["operations"][0]["xsql"].startswith("@search _q\n"))
+        self.assertEqual(sent["operations"][0]["params"], {"n": 2})
+
+    def test_compile_raises_on_per_op_error(self):
+        self.srv.route("/compile", (200, {"results": [
+            {"ok": False, "error": {"message": "XSQL parse error: boom",
+                                    "code": "XSQL_PARSE_ERROR"}}]}))
+        with self.assertRaises(SynthigyError) as cm:
+            self.static_client().compile("movie (\n")
+        self.assertEqual(cm.exception.code, "XSQL_PARSE_ERROR")
 
 
 class TestOnboarding(ClientTestCase):

@@ -16,8 +16,12 @@ Run: python3 -m unittest tests.test_integration -v
 import asyncio
 import os
 import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
 
-from synthigy import AsyncClient, Client, SynthigyError, eq, new_xid
+from synthigy import (AsyncClient, Client, MemoryLoginStore, SynthigyError,
+                      eq, new_xid)
 
 ENDPOINT = os.environ.get("SYNTHIGY_TEST_ENDPOINT", "http://localhost:7887")
 CLIENT_ID = os.environ.get("SYNTHIGY_TEST_CLIENT_ID")
@@ -43,6 +47,23 @@ CLIENT_SECRET = os.environ.get("SYNTHIGY_TEST_CLIENT_SECRET")
 #       client))
 PROVISION_CLIENT_ID = os.environ.get("SYNTHIGY_TEST_PROVISION_CLIENT_ID")
 PROVISION_CLIENT_SECRET = os.environ.get("SYNTHIGY_TEST_PROVISION_CLIENT_SECRET")
+
+
+# client.login runs the real authorization-code flow headlessly: authorize →
+# POST /oauth/login → callback code → complete(). Its own code-flow client and
+# a password user, created once via nREPL:
+#
+#   (access/with-principal nil
+#     (iam/add-client {:id "synthigy-py-sdk-login" :secret "<secret>" :type :confidential
+#                      :settings {"allowed-grants" ["authorization_code" "refresh_token"]
+#                                 "redirections" ["http://127.0.0.1:9/py-sdk/callback"]}})
+#     (dataset/sync-entity :iam/user {:name "py-sdk-login-user" :password "<pw>" :active true}))
+LOGIN_CLIENT_ID = os.environ.get("SYNTHIGY_TEST_LOGIN_CLIENT_ID")
+LOGIN_CLIENT_SECRET = os.environ.get("SYNTHIGY_TEST_LOGIN_CLIENT_SECRET")
+LOGIN_USER = os.environ.get("SYNTHIGY_TEST_LOGIN_USER")
+LOGIN_PASSWORD = os.environ.get("SYNTHIGY_TEST_LOGIN_PASSWORD")
+LOGIN_REDIRECT = os.environ.get("SYNTHIGY_TEST_LOGIN_REDIRECT",
+                                "http://127.0.0.1:9/py-sdk/callback")
 
 
 @unittest.skipUnless(CLIENT_ID and CLIENT_SECRET,
@@ -273,6 +294,100 @@ class TestLiveOnboarding(unittest.TestCase):
         result = self.client.onboard_complete(ticket)
         self.assertTrue(result["active"])
         self.assertEqual(result["user"]["xid"], created["xid"])
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **kw):
+        return None
+
+
+def _location(req):
+    """The Location of a 302, without following it."""
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        resp = opener.open(req, timeout=15)
+        status, headers = resp.status, resp.headers
+    except urllib.error.HTTPError as e:
+        status, headers = e.code, e.headers
+        e.close()
+    if status != 302:
+        raise AssertionError(f"expected 302, got {status}")
+    return urllib.parse.urlsplit(headers["Location"])
+
+
+def _browser_login(authorize_url):
+    """Play the browser: authorize → submit credentials → callback params."""
+    login_page = _location(authorize_url)
+    login_state = dict(urllib.parse.parse_qsl(login_page.query))["state"]
+    callback = _location(urllib.request.Request(
+        ENDPOINT + "/oauth/login",
+        data=urllib.parse.urlencode({"username": LOGIN_USER,
+                                     "password": LOGIN_PASSWORD,
+                                     "state": login_state}).encode()))
+    return dict(urllib.parse.parse_qsl(callback.query))
+
+
+@unittest.skipUnless(LOGIN_CLIENT_ID and LOGIN_CLIENT_SECRET and LOGIN_USER
+                     and LOGIN_PASSWORD,
+                     "set SYNTHIGY_TEST_LOGIN_CLIENT_ID/SECRET/USER/PASSWORD")
+class TestLiveLogin(unittest.TestCase):
+    def client(self):
+        c = Client(ENDPOINT, client_id=LOGIN_CLIENT_ID,
+                   client_secret=LOGIN_CLIENT_SECRET, timeout=15,
+                   login_store=MemoryLoginStore())
+        self.addCleanup(c.close)
+        return c
+
+    def test_code_flow_returns_user(self):
+        c = self.client()
+        url = c.login.start(redirect_uri=LOGIN_REDIRECT, return_to="/after",
+                            scope="openid profile")["url"]
+        cb = _browser_login(url)
+        out = c.login.complete(code=cb["code"], state=cb["state"],
+                               redirect_uri=LOGIN_REDIRECT)
+        self.assertEqual(out["user"]["name"], LOGIN_USER)
+        self.assertTrue(out["user"]["xid"])
+        self.assertIn("openid", out["user"]["scopes"])
+        self.assertEqual(out["return_to"], "/after")
+        self.assertTrue(out["tokens"]["access_token"])
+
+    def test_same_user_xid_across_logins(self):
+        c = self.client()
+        xids = []
+        for _ in range(2):
+            url = c.login.start(redirect_uri=LOGIN_REDIRECT)["url"]
+            cb = _browser_login(url)
+            xids.append(c.login.complete(code=cb["code"], state=cb["state"],
+                                         redirect_uri=LOGIN_REDIRECT)
+                        ["user"]["xid"])
+        self.assertEqual(xids[0], xids[1])
+
+    def test_wrong_secret_is_exchange_failed(self):
+        store = MemoryLoginStore()
+        good = Client(ENDPOINT, client_id=LOGIN_CLIENT_ID,
+                      client_secret=LOGIN_CLIENT_SECRET, login_store=store)
+        bad = Client(ENDPOINT, client_id=LOGIN_CLIENT_ID,
+                     client_secret="wrong", login_store=store)
+        self.addCleanup(good.close)
+        self.addCleanup(bad.close)
+        cb = _browser_login(good.login.start(redirect_uri=LOGIN_REDIRECT)["url"])
+        with self.assertRaises(SynthigyError) as cm:
+            bad.login.complete(code=cb["code"], state=cb["state"],
+                               redirect_uri=LOGIN_REDIRECT)
+        self.assertEqual(cm.exception.code, "LOGIN_EXCHANGE_FAILED")
+        self.assertIn(cm.exception.status, (400, 401))
+
+    def test_async_client(self):
+        async def run():
+            async with AsyncClient(ENDPOINT, client_id=LOGIN_CLIENT_ID,
+                                   client_secret=LOGIN_CLIENT_SECRET,
+                                   login_store=MemoryLoginStore()) as c:
+                url = (await c.login.start(redirect_uri=LOGIN_REDIRECT))["url"]
+                cb = await asyncio.to_thread(_browser_login, url)
+                return await c.login.complete(code=cb["code"], state=cb["state"],
+                                              redirect_uri=LOGIN_REDIRECT)
+
+        self.assertEqual(asyncio.run(run())["user"]["name"], LOGIN_USER)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ from .async_client import AsyncClient, PLATFORM_AUDIENCE  # noqa: F401
 from .compose import compose_forest, compose_tree  # noqa: F401
 from .errors import SynthigyError  # noqa: F401
 from .facade import Client
+from .login import LoginStore, MemoryLoginStore  # noqa: F401
 from .filters import (  # noqa: F401
     and_, eq, gt, gte, ilike, in_, is_not_null, is_null, like, lt, lte, neq,
     nin, not_, or_,
@@ -134,6 +135,7 @@ def exec_(*a, **kw): return _dflt().exec_(*a, **kw)
 # Introspection
 def schema(*a, **kw): return _dflt().schema(*a, **kw)
 def lint(*a, **kw): return _dflt().lint(*a, **kw)
+def compile(*a, **kw): return _dflt().compile(*a, **kw)
 def onboard(*a, **kw): return _dflt().onboard(*a, **kw)
 def onboard_complete(*a, **kw): return _dflt().onboard_complete(*a, **kw)
 def deploy(*a, **kw): return _dflt().deploy(*a, **kw)
@@ -142,6 +144,7 @@ def deployed_model(*a, **kw): return _dflt().deployed_model(*a, **kw)
 def runtime_model(*a, **kw): return _dflt().runtime_model(*a, **kw)
 def token(*a, **kw): return _dflt().token(*a, **kw)
 def history(): return _dflt().history
+def login(): return _dflt().login
 
 
 # Streaming

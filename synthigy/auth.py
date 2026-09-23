@@ -20,6 +20,21 @@ import urllib.request
 from .errors import SynthigyError
 
 
+def token_request_error(status, body):
+    """Map an /oauth/token refusal to UNAUTHORIZED, keeping the RFC 6749 error."""
+    text = body.decode("utf-8", "replace")
+    try:
+        oauth = json.loads(text)
+    except ValueError:
+        oauth = None
+    if isinstance(oauth, dict) and oauth.get("error"):
+        desc = oauth.get("error_description")
+        msg = f"token request refused ({status}): {oauth['error']}" + (f" — {desc}" if desc else "")
+        return SynthigyError(msg, "UNAUTHORIZED", oauth, status=status)
+    return SynthigyError(f"token request failed ({status}): {text}",
+                         "UNAUTHORIZED", status=status)
+
+
 class TokenManager:
     def __init__(self, token_url, client_id, client_secret, scope=None,
                  timeout=None):
@@ -58,9 +73,12 @@ class TokenManager:
                 with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                     data = json.loads(resp.read())
             except urllib.error.HTTPError as e:
-                text = e.read().decode(errors="replace")
-                raise RuntimeError(
-                    f"Token request failed ({e.code}): {text}") from None
+                with e:
+                    body = e.read()
+                raise token_request_error(e.code, body) from None
+            except (urllib.error.URLError, OSError) as e:
+                raise SynthigyError(f"token request failed: {e}",
+                                    "NETWORK_ERROR") from None
 
             token = data["access_token"]
             self._tokens[key] = (token, time.time() + data.get("expires_in", 3600))

@@ -20,6 +20,10 @@ ERROR_CATEGORIES = {
     "USER_INACTIVE": "auth",
     "PROVISION_FORBIDDEN": "auth",
     "CLAIM_INVALID": "auth",
+    "NO_TOKEN": "auth",  # client-side: no token source configured — retrying can't fix it
+    "NO_LOGIN_STORE": "auth",  # client-side: no login store configured — retrying can't fix it
+    "LOGIN_NONCE_MISMATCH": "auth",
+    "LOGIN_EXCHANGE_FAILED": "auth",
     # iam
     "FORBIDDEN": "iam",
     "FORBIDDEN_OP": "iam",
@@ -53,11 +57,14 @@ ERROR_CATEGORIES = {
     "QUERY_NOT_SELECT": "validation",
     "PARAM_MISSING": "validation",
     "PARAM_TYPE_MISMATCH": "validation",
+    "PARAM_UNKNOWN": "validation",
     "NOT_CONNECTED": "validation",
     "XID_REQUIRED": "validation",
     "CLAIM_METHOD_NOT_ALLOWED": "validation",
     "PASSWORD_TOO_WEAK": "validation",
     "RETURN_URL_NOT_REGISTERED": "validation",
+    "LOGIN_STATE_UNKNOWN": "validation",
+    "LOGIN_REQUIRES_CONFIDENTIAL_CLIENT": "validation",
     # not_found
     "UNKNOWN_ENTITY": "not_found",
     "UNKNOWN_RELATION": "not_found",

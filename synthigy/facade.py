@@ -36,7 +36,8 @@ async def _invoke(fn, *a, **kw):
 class Client:
     def __init__(self, endpoint, *, client_id=None, client_secret=None,
                  token=None, scope=None, audience=None, acting_as=None,
-                 key_format=None, timeout=None, keep_alive=False, on_op=None):
+                 key_format=None, timeout=None, keep_alive=False, on_op=None,
+                 login_store=None):
         """
         endpoint     : Synthigy base URL (required)
         client_id/client_secret : OAuth client-credentials mode
@@ -51,6 +52,8 @@ class Client:
         timeout      : per-request timeout in SECONDS
         keep_alive   : pin the SSE session open across watch churn
                        (starts the loop thread eagerly)
+        login_store  : where in-flight logins live between login.start()
+                       and the callback (see synthigy.login.LoginStore)
         """
         # Validate credentials eagerly (the engine constructs lazily) — same
         # source order as AsyncClient (PLAN-EXEC-IDENTITY.md step 3), just
@@ -65,7 +68,8 @@ class Client:
                             client_secret=client_secret, token=token,
                             scope=scope, audience=audience, acting_as=acting_as,
                             key_format=key_format, timeout=timeout,
-                            keep_alive=keep_alive, on_op=on_op)
+                            keep_alive=keep_alive, on_op=on_op,
+                            login_store=login_store)
         self._timeout = timeout
         self._loop = None
         self._thread = None
@@ -203,6 +207,9 @@ class Client:
     def lint(self, source, *, entity=None, op=None):
         return self._call("lint", source, entity=entity, op=op)
 
+    def compile(self, source, params=None, *, op="search"):
+        return self._call("compile", source, params, op=op)
+
     def onboard(self, xid, *, reset=None, methods=None, ttl_seconds=None,
                 return_url=None):
         return self._call("onboard", xid, reset=reset, methods=methods,
@@ -221,6 +228,13 @@ class Client:
         if not hasattr(self, "_history_api"):
             self._history_api = HistoryAPI(self)
         return self._history_api
+
+    @property
+    def login(self):
+        """OIDC authorization-code + PKCE: start / complete / cancel."""
+        if not hasattr(self, "_login_api"):
+            self._login_api = LoginAPI(self)
+        return self._login_api
 
     # ── subscriptions (advanced — prefer the watch family) ─────────────
 
@@ -321,6 +335,24 @@ class HistoryAPI:
 
     def since(self, *a, **kw):
         return self._call("since", *a, **kw)
+
+
+class LoginAPI:
+    def __init__(self, facade):
+        self._facade = facade
+
+    def _call(self, method, *a, **kw):
+        c = self._facade._ensure_started()
+        return self._facade._await(getattr(c.login, method)(*a, **kw))
+
+    def start(self, *a, **kw):
+        return self._call("start", *a, **kw)
+
+    def complete(self, *a, **kw):
+        return self._call("complete", *a, **kw)
+
+    def cancel(self, *a, **kw):
+        return self._call("cancel", *a, **kw)
 
 
 class _BootstrappedWatch:

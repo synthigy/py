@@ -273,13 +273,20 @@ def _docstring(text, indent):
     return f'{pad}"""{doc}"""'
 
 
-def _params_sig(params_t, all_optional):
+CALL_OPTS = "*, acting_as: str | None = None, timeout: float | None = None"
+CALL_PASS = "acting_as=acting_as, timeout=timeout"
+WATCH_OPTS = "*, acting_as: str | None = None"
+WATCH_PASS = "acting_as=acting_as"
+
+
+def _params_sig(params_t, all_optional, known, label, opts_sig=CALL_OPTS):
     """(signature-fragment, params-pass-expression)."""
     if not params_t:
-        return "**opts: Any", "{}"
+        return opts_sig, "{}"
+    check = f"_params(params, {sorted(known)!r}, {label!r})"
     if all_optional:
-        return f"params: {params_t} | None = None, **opts: Any", "dict(params or {})"
-    return f"params: {params_t}, **opts: Any", "dict(params)"
+        return f"params: {params_t} | None = None, {opts_sig}", check
+    return f"params: {params_t}, {opts_sig}", check
 
 
 def _emit_method(op, src, params_t, row_t):
@@ -291,17 +298,19 @@ def _emit_method(op, src, params_t, row_t):
     verb = op["op"]
     is_sql = verb == "sql-template"
     all_opt = all(p.get("optional") for p in op.get("params") or [])
-    sig, ppass = _params_sig(params_t, all_opt)
+    known = [p["name"] for p in op.get("params") or []]
+    sig, ppass = _params_sig(params_t, all_opt, known, name)
+    wsig, _ = _params_sig(params_t, all_opt, known, name, WATCH_OPTS)
     ret = f"{row_t} | None" if verb == "get" else f"list[{row_t}]"
 
     lines = ["    @staticmethod", f"    def {name}({sig}) -> {ret}:"]
     if op.get("description"):
         lines.append(_docstring(op["description"], 8))
     if is_sql:
-        lines.append(f"        return synthigy.sql_template({src}, {ppass}, **opts)")
+        lines.append(f"        return synthigy.sql_template({src}, {ppass}, {CALL_PASS})")
     else:
         lines.append(f"        return synthigy.query({src}, {ppass}, "
-                     f"op={verb!r}, **opts)")
+                     f"op={verb!r}, {CALL_PASS})")
     chunks = ["\n".join(lines)]
 
     alines = ["    @staticmethod", f"    async def {name}({sig}) -> {ret}:"]
@@ -309,29 +318,29 @@ def _emit_method(op, src, params_t, row_t):
         alines.append(_docstring(op["description"], 8))
     if is_sql:
         alines.append("        return await synthigy.aclient().sql_template("
-                      f"{src}, {ppass}, **opts)")
+                      f"{src}, {ppass}, {CALL_PASS})")
     else:
         alines.append("        return await synthigy.aclient().query("
-                      f"{src}, {ppass}, op={verb!r}, **opts)")
+                      f"{src}, {ppass}, op={verb!r}, {CALL_PASS})")
     achunks = ["\n".join(alines)]
 
     if op.get("watch"):
         wlines = ["    @staticmethod",
-                  f"    def watch_{name}({sig}) -> Any:"]
+                  f"    def watch_{name}({wsig}) -> Any:"]
         wlines.append(_docstring(
             f"Live {op['name']} — notify-then-refetch watch over the same "
             "op. Returns the watch handle (.ready() / .events() / .close()).", 8))
         if is_sql:
             ents = op["watch"] if isinstance(op["watch"], list) else []
             wlines.append(f"        return synthigy.watch_sql_template({src}, "
-                          f"{ppass}, entities={ents!r}, **opts)")
+                          f"{ppass}, entities={ents!r}, {WATCH_PASS})")
         else:
             wlines.append(f"        return synthigy.watch_query_xsql({src}, "
-                          f"{ppass}, entity={op['entity']!r}, **opts)")
+                          f"{ppass}, entity={op['entity']!r}, {WATCH_PASS})")
         chunks.append("\n".join(wlines))
 
         awlines = ["    @staticmethod",
-                   f"    def watch_{name}({sig}) -> Any:"]
+                   f"    def watch_{name}({wsig}) -> Any:"]
         awlines.append(_docstring(
             f"Live {op['name']} — native-async watch (`async with ... as "
             "w`, `async for ev in w`; derived query/added|changed|removed "
@@ -340,11 +349,11 @@ def _emit_method(op, src, params_t, row_t):
             ents = op["watch"] if isinstance(op["watch"], list) else []
             awlines.append("        return synthigy.aclient()"
                            f".watch_sql_template({src}, {ppass}, "
-                           f"entities={ents!r}, **opts)")
+                           f"entities={ents!r}, {WATCH_PASS})")
         else:
             awlines.append("        return synthigy.aclient()"
                            f".watch_query_xsql({src}, {ppass}, "
-                           f"entity={op['entity']!r}, **opts)")
+                           f"entity={op['entity']!r}, {WATCH_PASS})")
         achunks.append("\n".join(awlines))
     return chunks, achunks
 
@@ -370,7 +379,7 @@ def _emit_batch(batch, ops, type_chunks):
     params = [merged[n] for n in order]
     params_t = _emit_params(f"{pascal(name)}BatchParams", params, type_chunks)
     all_opt = all(p.get("optional") for p in params)
-    sig, ppass = _params_sig(params_t, all_opt)
+    sig, ppass = _params_sig(params_t, all_opt, order, name)
 
     dup = {n for n in {str(m["name"]).lower() for m in members}
            if sum(str(m["name"]).lower() == n for m in members) > 1}
@@ -391,19 +400,32 @@ def _emit_batch(batch, ops, type_chunks):
     doc = _docstring(
         f"Batch: {' + '.join(batch['members'])} — ONE wire request; results "
         "keyed by member name. A failed member's value is a SynthigyError "
-        "instance (not raised).", 4)
-    body = ([f"    _p = {ppass}", "    _operations = ["] + op_lines
+        "instance (not raised). Params are ONE flat dict shared by every "
+        "member: a name two members declare binds the same value in both.", 4)
+    body = ([f"    _p = {ppass if params_t else '{}'}", "    _operations = ["] + op_lines
             + ["    ]"])
     tail = ["    return {"] + res_lines + ["    }"]
 
     sync_fn = "\n".join(
         [f"def {name}({sig}) -> dict[str, Any]:", doc] + body
-        + ["    _results = synthigy.exec_(_operations, **opts)"] + tail)
+        + [f"    _results = synthigy.exec_(_operations, {CALL_PASS})"] + tail)
     async_fn = "\n".join(
         [f"async def {name}_async({sig}) -> dict[str, Any]:", doc] + body
-        + ["    _results = await synthigy.aclient().exec_(_operations, **opts)"]
+        + [f"    _results = await synthigy.aclient().exec_(_operations, {CALL_PASS})"]
         + tail)
     return [sync_fn, async_fn]
+
+
+_PARAMS_HELPER = '''\
+def _params(params: Any, known: list[str], op: str) -> dict:
+    """Reject params the operation doesn't declare — the server ignores them."""
+    p = dict(params or {})
+    unknown = sorted(set(p) - set(known))
+    if unknown:
+        raise SynthigyError(
+            f"{op}: unknown param(s) {', '.join(unknown)}; "
+            f"declared: {', '.join(known) or '(none)'}", "PARAM_UNKNOWN")
+    return p'''
 
 
 _BATCH_HELPER = '''\
@@ -456,8 +478,12 @@ def _attr_py_write(attr):
     on input; reference types (type == an entity name) are FK id strings."""
     t = attr.get("type")
     if t == "enum":
-        return "Literal[" + ", ".join(repr(str(v)) for v in attr.get("enum") or []) + "]" \
-            if attr.get("enum") else "str"
+        values = attr.get("enum") or []
+        retired = set(attr.get("retired") or [])
+        writable = [v for v in values if v not in retired]
+        if writable:
+            return "Literal[" + ", ".join(repr(str(v)) for v in writable) + "]"
+        return "None" if values else "str"
     if t == "hashed":
         return "str"
     return PY_SCALAR.get(t, "str")
@@ -473,11 +499,12 @@ def _emit_write_types(entity, schema, referenced, chunks):
         if k == "xid" or k in rels:
             continue
         t = _attr_py_write(a)
+        read_t = _attr_py_write({**a, "retired": None})
         if a.get("nullable") is False:
             in_entries.append((k, t))              # required on input
         else:
-            in_entries.append((k, f"NotRequired[{t} | None]"))
-        res_entries.append((k, f"NotRequired[{t} | None]"))
+            in_entries.append((k, f"NotRequired[{t}]" if t == "None" else f"NotRequired[{t} | None]"))
+        res_entries.append((k, f"NotRequired[{read_t} | None]"))
     for k, r in rels.items():
         if r.get("to") not in (schema.get("entities") or {}):
             continue   # relation target filtered out of the schema → skip
@@ -497,43 +524,50 @@ def _emit_write_types(entity, schema, referenced, chunks):
 def _emit_write_fns(entity, schema):
     E = entity_pascal(schema, entity)
     fn = safe_ident(entity)
+    o = "acting_as: str | None = None, timeout: float | None = None"
     return f'''\
 @overload
 def sync_{fn}(data: {E}Input, *, returning: Literal[True],
-              **opts: Any) -> {E}WriteResult: ...
+              {o}) -> {E}WriteResult: ...
 @overload
 def sync_{fn}(data: list[{E}Input], *, returning: Literal[True],
-              **opts: Any) -> list[{E}WriteResult]: ...
+              {o}) -> list[{E}WriteResult]: ...
 @overload
-def sync_{fn}(data: {E}Input | list[{E}Input], **opts: Any) -> WriteCount: ...
-def sync_{fn}(data, **opts):
-    """Upsert {entity} record(s) — REPLACES relation link-sets.
+def sync_{fn}(data: {E}Input | list[{E}Input], *, returning: Literal[False] = False,
+              {o}) -> WriteCount: ...
+def sync_{fn}(data, *, returning=False, acting_as=None, timeout=None):
+    """Upsert {entity} record(s) — each relation key SENT is replaced exactly;
+    keys left out are untouched.
 
     Silent by default: answers {{"count": n}}. Pass returning=True for the
     written records, or mint ids up front with synthigy.new_xid().
     """
-    return synthigy.sync({entity!r}, data, **opts)
+    return synthigy.sync({entity!r}, data, returning=returning,
+                         acting_as=acting_as, timeout=timeout)
 
 
 @overload
 def stack_{fn}(data: {E}Input, *, returning: Literal[True],
-               **opts: Any) -> {E}WriteResult: ...
+               {o}) -> {E}WriteResult: ...
 @overload
 def stack_{fn}(data: list[{E}Input], *, returning: Literal[True],
-               **opts: Any) -> list[{E}WriteResult]: ...
+               {o}) -> list[{E}WriteResult]: ...
 @overload
-def stack_{fn}(data: {E}Input | list[{E}Input], **opts: Any) -> WriteCount: ...
-def stack_{fn}(data, **opts):
+def stack_{fn}(data: {E}Input | list[{E}Input], *, returning: Literal[False] = False,
+               {o}) -> WriteCount: ...
+def stack_{fn}(data, *, returning=False, acting_as=None, timeout=None):
     """Additive write to {entity} — relation links are ADDED, never removed.
 
     Same returning contract as sync_{fn}.
     """
-    return synthigy.stack({entity!r}, data, **opts)
+    return synthigy.stack({entity!r}, data, returning=returning,
+                          acting_as=acting_as, timeout=timeout)
 
 
-def delete_{fn}(xid: str, **opts: Any) -> Any:
-    """Soft-delete one {entity} record by xid."""
-    return synthigy.delete({entity!r}, {{"xid": xid}}, **opts)'''
+def delete_{fn}(xid: str, *, {o}) -> Any:
+    """Delete one {entity} record by xid."""
+    return synthigy.delete({entity!r}, {{"xid": xid}}, acting_as=acting_as,
+                           timeout=timeout)'''
 
 
 # ── render ───────────────────────────────────────────────────────────────────
@@ -638,10 +672,15 @@ def render(ir, schema=None, *, writes=True, input_name="<xsql>"):
         "try:\n"
         "    from typing import NotRequired  # Python >= 3.11\n"
         "except ImportError:  # pragma: no cover\n"
-        "    from typing_extensions import NotRequired  # type: ignore\n\n"
+        "    try:\n"
+        "        from typing_extensions import NotRequired  # type: ignore\n"
+        "    except ImportError:\n"
+        "        class NotRequired:  # type: ignore  # runtime no-op; checkers use their own stubs\n"
+        "            def __class_getitem__(cls, item):\n"
+        "                return item\n\n"
         + "\n".join(imports) + "\n")
 
-    parts = [header]
+    parts = [header, _PARAMS_HELPER]
     if batch_chunks:
         parts.append(_BATCH_HELPER)
     parts += ["\n\n".join(src_chunks)] if src_chunks else []

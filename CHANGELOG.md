@@ -3,6 +3,47 @@
 All notable changes to `synthigy` (PyPI). Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.0
+
+### Changed
+- **Token failures are `SynthigyError`**: an `/oauth/token` refusal raises
+  `UNAUTHORIZED` (`.status`, the RFC 6749 error in `.details`, its description
+  in the message); an unreachable token endpoint raises `NETWORK_ERROR`. Was a
+  bare `RuntimeError`.
+- **`NO_TOKEN` is no longer retryable** (category `auth`, was `internal`).
+- **Generated modules import on Python 3.10 with zero dependencies**: the
+  `NotRequired` fallback no longer requires `typing_extensions` (it was an
+  undeclared dependency; import failed on 3.10 without it).
+- **`login.complete()` refuses an id_token with no `xid` claim**
+  (`LOGIN_EXCHANGE_FAILED`) instead of returning `xid: None`, which as
+  `acting_as` would have run the user's calls as the service.
+- **Generated functions take `acting_as=` / `timeout=` explicitly** instead of
+  `**opts`, so a param passed as a keyword (`Rack.racks(q=...)`) fails at the
+  call instead of deep in the client. Regenerate to pick it up.
+
+### Added
+- **`PARAM_UNKNOWN`** — generated operations and batches reject params the
+  operation doesn't declare (the server silently ignores them), e.g. a
+  per-member `{"racks": {...}}` dict passed to a batch, whose params are one
+  flat dict shared by every member.
+- Generated `*Input` types leave out retired enum values when `/schema`
+  publishes `retired` — they read back but the engine refuses to write them.
+- **`client.login.start / complete / cancel`** — OIDC authorization code + PKCE
+  for confidential servers (BFFs), on `AsyncClient`, the blocking facade and
+  `synthigy.login()`. The SDK owns the protocol (PKCE, state, nonce, code
+  exchange, id_token → `{xid, name, scopes}`); sessions stay the app's. In-flight
+  logins live in a pluggable `login_store=` (`LoginStore` protocol, sync or
+  async); `MemoryLoginStore` for single-process dev. New error codes:
+  `NO_LOGIN_STORE`, `LOGIN_REQUIRES_CONFIDENTIAL_CLIENT`, `LOGIN_STATE_UNKNOWN`,
+  `LOGIN_NONCE_MISMATCH`, `LOGIN_EXCHANGE_FAILED`. Zero new dependencies.
+- **`compile(source, params=None, *, op="search")`** — on `AsyncClient`, on the
+  blocking facade, and as a module-level delegate. `POST /compile` returns the
+  wire operation the engine would execute for an XSQL source, without executing
+  it. The compiler is the authority on the wire format, so this is how you take
+  programmatic control of a query instead of hand-writing the dict: edit what
+  comes back and pass it to `exec_()`. `params` bind exactly as on `query`, so
+  the result IS what the engine receives.
+
 ## 0.1.1
 
 ### Added

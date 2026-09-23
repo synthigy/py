@@ -46,16 +46,16 @@ class TestRender(unittest.TestCase):
     def test_read_tier_signatures(self):
         # all-optional params → params optional; search → list[Row]
         self.assertIn("def list(params: MovieListParams | None = None, "
-                      "**opts: Any) -> list[MovieListRow]:", self.code)
+                      "*, acting_as: str | None = None, timeout: float | None = None) -> list[MovieListRow]:", self.code)
         # required param → positional; get → Row | None
         self.assertIn("def detail(params: MovieDetailParams, "
-                      "**opts: Any) -> MovieDetailRow | None:", self.code)
+                      "*, acting_as: str | None = None, timeout: float | None = None) -> MovieDetailRow | None:", self.code)
         self.assertIn("op='get'", self.code)
         # STRICT wire: no entity field — the document carries it
         self.assertNotIn("entity='movie'", self.code.split("def watch_")[0])
         # sql-template rides sql_template, typed from @returns
         self.assertIn("def count(params: MovieCountParams | None = None, "
-                      "**opts: Any) -> list[MovieCountRow]:", self.code)
+                      "*, acting_as: str | None = None, timeout: float | None = None) -> list[MovieCountRow]:", self.code)
         self.assertIn('"total": int,', self.code)
 
     def test_row_types(self):
@@ -107,6 +107,24 @@ class TestRender(unittest.TestCase):
                    "sync_user_rating"):
             self.assertIn(f"def {fn}(", self.code)
         self.assertIn('"xid": str,', self.code)   # WriteResult xid required
+
+    def test_retired_enum_values_are_readable_not_writable(self):
+        write = codegen._attr_py_write
+        self.assertEqual(write({"type": "enum", "enum": ["A", "B", "C"],
+                                "retired": ["B"]}), "Literal['A', 'C']")
+        self.assertEqual(write({"type": "enum", "enum": ["A"],
+                                "retired": ["A"]}), "None")
+        self.assertEqual(write({"type": "enum"}), "str")
+
+    def test_retired_enum_write_result_keeps_read_type(self):
+        schema = {"entities": {"rack": {"attributes": {
+            "type": {"type": "enum", "enum": ["A", "B"], "retired": ["A", "B"]}},
+            "relations": {}}}}
+        chunks = []
+        codegen._emit_write_types("rack", schema, ["rack"], chunks)
+        code = "\n".join(chunks)
+        self.assertIn('"type": NotRequired[None],', code)
+        self.assertIn('"type": NotRequired[Literal[\'A\', \'B\'] | None],', code)
 
     def test_no_writes(self):
         code = codegen.render(load_fixtures()[0], None, writes=False)
@@ -262,6 +280,32 @@ class TestGeneratedWire(unittest.TestCase):
         self.gen.Movie.list({"limit": 1}, acting_as="u-1")
         self.assertEqual(self.body()["acting_as"], "u-1")
 
+    def test_param_as_kwarg_fails_at_the_call(self):
+        with self.assertRaises(TypeError) as cm:
+            self.gen.Movie.list(limit=1)
+        self.assertIn("limit", str(cm.exception))
+        self.assertEqual(self.srv.requests_to("/data"), [])
+
+    def test_unknown_param_rejected(self):
+        with self.assertRaises(SynthigyError) as cm:
+            self.gen.Movie.list({"limt": 1})
+        self.assertEqual(cm.exception.code, "PARAM_UNKNOWN")
+        self.assertIn("limt", cm.exception.message)
+        self.assertEqual(self.srv.requests_to("/data"), [])
+
+    def test_batch_rejects_per_member_nesting(self):
+        with self.assertRaises(SynthigyError) as cm:
+            self.gen.overview({"list": {"limit": 2}})
+        self.assertEqual(cm.exception.code, "PARAM_UNKNOWN")
+        self.assertEqual(self.srv.requests_to("/data"), [])
+
+    def test_write_opts_thread_through(self):
+        self.srv.route("/data", (200, ok_results({"count": 1})))
+        self.gen.stack_movie_genre({"name": "N"}, acting_as="u-2", timeout=5)
+        self.assertEqual(self.body()["acting_as"], "u-2")
+        with self.assertRaises(TypeError):
+            self.gen.sync_movie_genre({"name": "N"}, bogus=1)
+
 
 class TestAsyncEmission(unittest.TestCase):
     """Async twins: *Async classes + *_async batches run on the module
@@ -275,7 +319,7 @@ class TestAsyncEmission(unittest.TestCase):
         self.assertIn("class MovieAsync:", self.code)
         self.assertIn("class DashboardAsync:", self.code)
         self.assertIn("async def list(params: MovieListParams | None = None, "
-                      "**opts: Any) -> list[MovieListRow]:", self.code)
+                      "*, acting_as: str | None = None, timeout: float | None = None) -> list[MovieListRow]:", self.code)
         self.assertIn("await synthigy.aclient().query(_SRC_MOVIE_LIST",
                       self.code)
         # async watch twin returns the native handle (not awaited)

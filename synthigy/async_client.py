@@ -63,6 +63,7 @@ from .events import (
     _row_key, _rows_equal, _union_changed, descriptor_key, kebab, matches,
     normalize_descriptor, normalize_interest, shape_event,
 )
+from .login import REJECTING_LOGIN_STORE, AsyncLoginAPI
 from .selection import normalize_selection
 from .util import generate_request_id, now_iso, xsql_document
 
@@ -1368,7 +1369,8 @@ class AsyncClient:
 
     def __init__(self, endpoint, *, client_id=None, client_secret=None,
                  token=None, scope=None, audience=None, acting_as=None,
-                 key_format=None, timeout=None, keep_alive=False, on_op=None):
+                 key_format=None, timeout=None, keep_alive=False, on_op=None,
+                 login_store=None):
         """
         endpoint     : Synthigy base URL (required)
         client_id/client_secret : OAuth client-credentials mode
@@ -1386,6 +1388,11 @@ class AsyncClient:
                        verbs also take a per-call timeout=)
         keep_alive   : pin the SSE session open across watch churn
                        (needs a running event loop at construction)
+        login_store  : where in-flight logins live between login.start()
+                       and the callback (see synthigy.login.LoginStore).
+                       Without one, every client.login call raises
+                       NO_LOGIN_STORE rather than silently keeping state
+                       in one process.
         """
         self._endpoint = endpoint.rstrip("/")
         self._data_url = self._endpoint + "/data"
@@ -1395,6 +1402,13 @@ class AsyncClient:
         self._keep_alive = keep_alive
         self._on_op = on_op
         self._pool = _AsyncPool(timeout=timeout)
+        # Retained for login's code exchange, which authenticates this
+        # process as a confidential client. Set unconditionally: a client can
+        # be static-token for /data AND confidential for login.
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._login_store = (login_store if login_store is not None
+                             else REJECTING_LOGIN_STORE)
         # This SDK is the client for the platform API, so that is what it mints
         # for. Nothing to configure, and nowhere to look the value up if there
         # were: the server does not advertise it in discovery. The env var stays
@@ -1704,6 +1718,34 @@ class AsyncClient:
                                 "HTTP_ERROR", status=status)
         return json.loads(data).get("diagnostics", [])
 
+    async def compile(self, source, params=None, *, op="search"):
+        """Compile an XSQL source to the wire operation the engine would
+        execute (POST /compile) -> dict. Nothing runs: the compiler is the
+        authority on the wire format, so this is how you take programmatic
+        control of a query instead of hand-writing the map — edit what comes
+        back and pass it to exec_(). `params` bind exactly as they do on
+        query(), so the result IS what the engine receives."""
+        o = {"op": "xsql", "xsql": xsql_document(source, op)}
+        if params is not None:
+            o["params"] = params
+        status, _h, data = await self._authed(
+            "POST", "/compile", body=json.dumps({"operations": [o]}).encode(),
+            headers={"Content-Type": "application/json"})
+        if not 200 <= status < 300:
+            raise SynthigyError(f"compile request failed ({status})",
+                                "HTTP_ERROR", status=status)
+        results = json.loads(data).get("results") or []
+        if not results:
+            raise SynthigyError("compile returned no results",
+                                "INTERNAL_ERROR", status=status)
+        result = results[0]
+        if not result.get("ok"):
+            err = result.get("error") or {}
+            raise SynthigyError(err.get("message", "compile failed"),
+                                err.get("code", "XSQL_PARSE_ERROR"),
+                                status=status)
+        return result["operation"]
+
     async def onboard(self, xid, *, reset=None, methods=None,
                       ttl_seconds=None, return_url=None):
         """Mint a one-time account-claim link (POST /oauth/onboard).
@@ -1781,6 +1823,13 @@ class AsyncClient:
         if not hasattr(self, "_history"):
             self._history = AsyncHistoryAPI(self)
         return self._history
+
+    @property
+    def login(self):
+        """OIDC authorization-code + PKCE: start / complete / cancel."""
+        if not hasattr(self, "_login"):
+            self._login = AsyncLoginAPI(self)
+        return self._login
 
     # ── subscriptions (advanced — prefer the watch family) ─────────────
     # Raw calls here clobber a live watch multiplexer's union: the mux

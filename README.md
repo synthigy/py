@@ -219,7 +219,49 @@ server logs). Discriminate on `.code`, never the message.
   runs unchanged bare, under `exec`, and under a production commander.
   See `docs/plans/PLAN-EXEC-IDENTITY.md`.
 - `acting_as` is server-verified impersonation for **trusted confidential**
-  clients (the BFF model) — the SDK never handles end-user OAuth redirects.
+  clients (the BFF model).
+
+### Logging users in (`client.login`)
+
+Authorization code + PKCE for a confidential server (BFF): the SDK owns the
+protocol, your app owns sessions, cookies and routing. The SDK never serves a
+route or issues a redirect — `start()` returns a URL, `complete()` takes the
+callback's `code`/`state`; the HTTP handlers are yours. The one piece of state
+the flow needs between `/login` and the callback lives in a `login_store` you
+supply — anything with `put(state, login)` and one-shot `take(state)`, sync or
+async (a dict, `redis.asyncio`, a DB table).
+
+```python
+client = synthigy.AsyncClient(ENDPOINT, client_id=ID, client_secret=SECRET,
+                              login_store=synthigy.MemoryLoginStore())
+
+@app.get("/login")
+async def login(returnTo: str = "/"):
+    started = await client.login.start(redirect_uri=CALLBACK, return_to=returnTo)
+    return RedirectResponse(started["url"], 302)
+
+@app.get("/auth/callback")
+async def callback(code: str = "", state: str = "", error: str = ""):
+    if error:                                 # user cancelled at the IdP
+        back = await client.login.cancel(state)
+        return RedirectResponse(back["return_to"] if back else "/", 302)
+    done = await client.login.complete(code=code, state=state,
+                                       redirect_uri=CALLBACK)
+    # done["user"] = {"xid", "name", "scopes"}; done["tokens"]; done["return_to"]
+    ...  # your session, your cookie
+```
+
+- `user["xid"]` is read from the id_token — no `/data` lookup. Pass it as
+  `acting_as` to act on the user's behalf.
+- `MemoryLoginStore` is **single process**: behind a load balancer the
+  callback can land on a worker that never saw `/login`
+  (`LOGIN_STATE_UNKNOWN`). Back the store with what holds your sessions.
+- No store configured → `NO_LOGIN_STORE`; no `client_secret` →
+  `LOGIN_REQUIRES_CONFIDENTIAL_CLIENT`. A browser or native app is a public
+  client and uses its own PKCE library.
+- `start(..., public_endpoint=)` when the browser reaches the IdP on a
+  different URL than this process does (containers, reverse proxies).
+- The code exchange never retries: an authorization code is one-shot.
 
 ## Codegen
 
@@ -278,6 +320,10 @@ SYNTHIGY_TEST_CLIENT_ID=... SYNTHIGY_TEST_CLIENT_SECRET=... \
 
 Register a dedicated OAuth client for the live suite (trusted confidential,
 `client_credentials`) — never share identity with a live app.
+`TestLiveLogin` drives the real authorization-code flow headlessly and needs
+its own code-flow client plus a password user:
+`SYNTHIGY_TEST_LOGIN_CLIENT_ID/_SECRET/_USER/_PASSWORD` (setup snippet in
+`tests/test_integration.py`).
 
 ## License
 
