@@ -373,7 +373,7 @@ class TestCli(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         (self.dir / "example.xsql").write_text(
             (FIXTURES / "example.xsql").read_text())
-        (self.dir / "example.ir.json").write_text(
+        (self.dir / "ops.ir.json").write_text(
             (FIXTURES / "example.ir.json").read_text())
         (self.dir / "synthigy.schema.json").write_text(
             (FIXTURES / "schema.json").read_text())
@@ -394,6 +394,35 @@ class TestCli(unittest.TestCase):
         py_compile.compile(str(out), doraise=True)
         self.assertIn("class Movie:", out.read_text())
 
+    def test_regenerate_header_repeats_the_command(self):
+        out = self.dir / "gen" / "ops.py"
+        with self._env(), redirect_stdout(io.StringIO()):
+            rc = codegen.main(["gen", str(self.dir), "--out", str(out), "--no-writes"])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"# Regenerate: python3 -m synthigy.codegen gen {self.dir} --out {out} --no-writes\n",
+                      out.read_text())
+
+    def test_gen_directory_recurses(self):
+        nested = self.dir / "movies" / "example.xsql"
+        nested.parent.mkdir()
+        (self.dir / "example.xsql").rename(nested)
+        with self._env(), redirect_stdout(io.StringIO()):
+            rc = codegen.main(["gen", str(self.dir)])
+        self.assertEqual(rc, 0)
+        self.assertIn("class Movie:", (self.dir / "ops_gen.py").read_text())
+
+    def test_sources_sorted_by_relative_path_and_merged(self):
+        (self.dir / "example.xsql").unlink()
+        (self.dir / "b").mkdir()
+        (self.dir / "b" / "z.xsql").write_text("@workspace w2\nZ")
+        (self.dir / "a.xsql").write_text("@workspace w1\nA")
+        (self.dir / "b.xsql").write_text("B")
+        paths = codegen.xsql_files([str(self.dir)])
+        self.assertEqual([p.relative_to(self.dir).as_posix() for p in paths],
+                         ["a.xsql", "b.xsql", "b/z.xsql"])
+        self.assertEqual(codegen.read_sources(paths),
+                         "@workspace w1\nA\n\nB\n\nZ")
+
     def test_check_ok_offline_when_hash_matches(self):
         with self._env(), redirect_stdout(io.StringIO()):
             self.assertEqual(
@@ -409,7 +438,7 @@ class TestCli(unittest.TestCase):
         self.assertIn("gen", err.getvalue())   # re-run hint
 
     def test_check_fails_without_saved_ir(self):
-        (self.dir / "example.ir.json").unlink()
+        (self.dir / "ops.ir.json").unlink()
         with self._env(), redirect_stderr(io.StringIO()):
             self.assertEqual(
                 codegen.main(["check", str(self.dir / "example.xsql")]), 1)

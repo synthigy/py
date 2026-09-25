@@ -7,6 +7,7 @@ import asyncio
 import json
 import threading
 import unittest
+import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import synthigy
@@ -313,13 +314,27 @@ class TestErrors(ClientTestCase):
 class TestAuth(ClientTestCase):
     def test_config_validation(self):
         # No token, no creds, no SYNTHIGY_TOKEN/SYNTHIGY_SUPERVISED in the
-        # env — the teaching throw (PLAN-EXEC-IDENTITY.md step 3), not a
+        # env — the teaching throw, not a
         # bare ValueError.
         with self.assertRaises(SynthigyError) as ctx:
             Client(self.srv.endpoint)
         self.assertEqual(ctx.exception.code, "NO_TOKEN")
         self.assertEqual(ctx.exception.category, "auth")
         self.assertFalse(ctx.exception.retryable)
+
+    def test_endpoint_defaults_to_env(self):
+        with unittest.mock.patch.dict("os.environ", {"SYNTHIGY_ENDPOINT": self.srv.endpoint}):
+            c = Client(token="t")
+            self.assertEqual(c._config["endpoint"], self.srv.endpoint)
+            a = AsyncClient(token="t")
+            self.assertEqual(a._endpoint, self.srv.endpoint)
+
+    def test_no_endpoint_is_typed(self):
+        with unittest.mock.patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(SynthigyError) as ctx:
+                Client(token="t")
+        e = ctx.exception
+        self.assertEqual((e.code, e.category, e.retryable), ("NO_ENDPOINT", "validation", False))
 
     def test_token_refusal_is_typed(self):
         self.srv.route("/oauth/token", (400, {
@@ -597,6 +612,18 @@ class TestFacadeLifecycle(ClientTestCase):
         # the object stays usable — a later call transparently restarts
         self.assertEqual(c.search("User", None, None), [])
         c.close()
+
+    def test_sync_and_stack_take_a_list_in_one_operation(self):
+        self.srv.route("/data", (200, ok_results({"count": 2})))
+        c = self.static_client()
+        self.addCleanup(c.close)
+        self.assertEqual(c.sync("Movie", [{"title": "A"}, {"title": "B"}]), {"count": 2})
+        ops = json.loads(self.srv.requests_to("/data")[-1]["body"])["operations"]
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0]["data"], [{"title": "A"}, {"title": "B"}])
+        c.stack("Movie", [{"xid": "a"}], returning=True)
+        op = json.loads(self.srv.requests_to("/data")[-1]["body"])["operations"][0]
+        self.assertEqual((op["op"], op["returning"]), ("stack", True))
 
     def test_sync_and_async_interleaved_one_process(self):
         self.srv.route("/data", (200, ok_results([{"xid": "u"}])))

@@ -223,8 +223,8 @@ class TestLiveAsync(unittest.TestCase):
                      "set SYNTHIGY_TEST_PROVISION_CLIENT_ID/SECRET "
                      "(a confidential client holding User Provisioner) to run")
 class TestLiveOnboarding(unittest.TestCase):
-    """Proves onboard() against a real scoped provisioner. Onboarding no
-    longer creates accounts (PLAN-ONBOARDING.md P1) — each test creates its
+    """Proves onboard() against a real scoped provisioner. Onboarding does
+    not create accounts — each test creates its
     own account via sync() first, stamped with the client's own owner group
     so it lands inside the principal's write scope, then mints a ticket for
     its xid."""

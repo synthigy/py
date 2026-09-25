@@ -1356,6 +1356,16 @@ def _parse_onboard_response(data, status, label):
     return parsed
 
 
+def resolve_endpoint(endpoint=None):
+    """The caller's endpoint, else $SYNTHIGY_ENDPOINT, without a trailing slash."""
+    endpoint = endpoint or os.environ.get("SYNTHIGY_ENDPOINT")
+    if not endpoint:
+        raise SynthigyError(
+            "no endpoint — pass one, or set SYNTHIGY_ENDPOINT "
+            "(run under `synthigy exec`)", "NO_ENDPOINT")
+    return endpoint.rstrip("/")
+
+
 class AsyncClient:
     """Async-native Synthigy client — the engine. Reads, XSQL,
     sql-template, writes, batch, trees, history, schema/lint, raw
@@ -1367,12 +1377,12 @@ class AsyncClient:
     {"path", "status", "duration_ms"} — the observability seam; wire it to
     Prometheus/OTel yourself, the SDK takes no dependency."""
 
-    def __init__(self, endpoint, *, client_id=None, client_secret=None,
+    def __init__(self, endpoint=None, *, client_id=None, client_secret=None,
                  token=None, scope=None, audience=None, acting_as=None,
                  key_format=None, timeout=None, keep_alive=False, on_op=None,
                  login_store=None):
         """
-        endpoint     : Synthigy base URL (required)
+        endpoint     : Synthigy base URL (defaults to $SYNTHIGY_ENDPOINT)
         client_id/client_secret : OAuth client-credentials mode
         token        : static bearer token (empty string allowed — dev/authless)
         scope        : OAuth scope for client-credentials mode
@@ -1394,7 +1404,7 @@ class AsyncClient:
                        NO_LOGIN_STORE rather than silently keeping state
                        in one process.
         """
-        self._endpoint = endpoint.rstrip("/")
+        self._endpoint = resolve_endpoint(endpoint)
         self._data_url = self._endpoint + "/data"
         self._default_acting_as = acting_as
         self._default_key_format = key_format
@@ -1417,7 +1427,7 @@ class AsyncClient:
                                   or os.environ.get("SYNTHIGY_AUDIENCE")
                                   or PLATFORM_AUDIENCE)
 
-        # Token source resolution — PLAN-EXEC-IDENTITY.md step 3, in order:
+        # Token source resolution, in order:
         # caller-supplied (code) -> client credentials (code) ->
         # SYNTHIGY_SUPERVISED stdio ask -> SYNTHIGY_TOKEN env -> the teaching
         # throw. The pipe beats the env var deliberately: exec injects the
@@ -1621,7 +1631,8 @@ class AsyncClient:
     # ── writes ─────────────────────────────────────────────────────────
 
     async def sync(self, entity, data, *, returning=False, **opts):
-        """Upsert. Silent by default — answers {"count": n}; pass
+        """Upsert one record (a dict) or many (a list — one operation, for
+        bulk import). Silent by default — answers {"count": n}; pass
         returning=True for the written records, or mint ids up front with
         new_xid(), which is the cheap way to know what you wrote."""
         return await self._one({"op": "sync", "entity": entity,
@@ -1629,7 +1640,7 @@ class AsyncClient:
                                 "returning": bool(returning)}, **opts)
 
     async def stack(self, entity, data, *, returning=False, **opts):
-        """Additive upsert. Same returning contract as sync."""
+        """Additive upsert, one record or a list. Same returning contract as sync."""
         return await self._one({"op": "stack", "entity": entity,
                                 "data": data,
                                 "returning": bool(returning)}, **opts)

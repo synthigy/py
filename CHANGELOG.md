@@ -3,6 +3,38 @@
 All notable changes to `synthigy` (PyPI). Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.3.0
+
+### Added
+- **`connect()` / `aconnect()` / `Client()` / `AsyncClient()` take the
+  endpoint from `SYNTHIGY_ENDPOINT` when none is passed.** Under
+  `synthigy exec` that and the identity are already set, so `synthigy.connect()`
+  with no arguments is the whole setup. No endpoint anywhere raises
+  `NO_ENDPOINT` (category `validation`, not retryable).
+- **Codegen takes several `.xsql` files or directories.** `gen` and `check`
+  accept any mix of files and directories (searched recursively, sorted by
+  path); one module is generated for all of them. The default output is
+  `<name>_gen.py` for a single file and `ops_gen.py` otherwise.
+
+### Changed
+- **Codegen no longer falls back to `http://localhost:7887`.** With no
+  endpoint passed and no `SYNTHIGY_ENDPOINT`, a run that needs the server
+  fails with `NO_ENDPOINT`, as the client does; offline runs from a current
+  `ops.ir.json` are unaffected.
+- **Codegen reads and writes `ops.ir.json`** in the `.xsql` directory, the IR
+  file every other SDK's generator shares (was `<file>.ir.json` beside each
+  source). A CI `check` gate pointing at the old file must be re-pointed;
+  the first `gen` writes the new one.
+- **Codegen:** each `.xsql` file is sent to `describe` separately (`sources: [{path,
+  source}]`) instead of one concatenated text. Concatenation leaked the
+  first file's buffer-level `@namespace` into every later file and dropped
+  the others'. Needs an engine with per-file `describe`. A `(namespace,
+  name)` declared twice across files now fails with `DUPLICATE_OPERATION`,
+  naming both files; a `@batch` naming an op from another file fails with
+  `BATCH_MEMBER_UNRESOLVED`. Both are `validation` in the error table.
+  A validation failure from `describe` no longer adds the misleading
+  "run under `synthigy exec`" hint.
+
 ## 0.2.0
 
 ### Changed

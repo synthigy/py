@@ -21,6 +21,7 @@ ERROR_CATEGORIES = {
     "PROVISION_FORBIDDEN": "auth",
     "CLAIM_INVALID": "auth",
     "NO_TOKEN": "auth",  # client-side: no token source configured — retrying can't fix it
+    "NO_ENDPOINT": "validation",  # client-side: no endpoint configured — retrying can't fix it
     "NO_LOGIN_STORE": "auth",  # client-side: no login store configured — retrying can't fix it
     "LOGIN_NONCE_MISMATCH": "auth",
     "LOGIN_EXCHANGE_FAILED": "auth",
@@ -60,6 +61,9 @@ ERROR_CATEGORIES = {
     "PARAM_UNKNOWN": "validation",
     "NOT_CONNECTED": "validation",
     "XID_REQUIRED": "validation",
+    "NAMESPACE_REQUIRED": "validation",
+    "DUPLICATE_OPERATION": "validation",
+    "BATCH_MEMBER_UNRESOLVED": "validation",
     "CLAIM_METHOD_NOT_ALLOWED": "validation",
     "PASSWORD_TOO_WEAK": "validation",
     "RETURN_URL_NOT_REGISTERED": "validation",

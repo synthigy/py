@@ -23,7 +23,7 @@ import concurrent.futures
 import os
 import threading
 
-from .async_client import AsyncClient
+from .async_client import AsyncClient, resolve_endpoint
 from .errors import SynthigyError
 
 
@@ -34,12 +34,12 @@ async def _invoke(fn, *a, **kw):
 
 
 class Client:
-    def __init__(self, endpoint, *, client_id=None, client_secret=None,
+    def __init__(self, endpoint=None, *, client_id=None, client_secret=None,
                  token=None, scope=None, audience=None, acting_as=None,
                  key_format=None, timeout=None, keep_alive=False, on_op=None,
                  login_store=None):
         """
-        endpoint     : Synthigy base URL (required)
+        endpoint     : Synthigy base URL (defaults to $SYNTHIGY_ENDPOINT)
         client_id/client_secret : OAuth client-credentials mode
         token        : static bearer token (empty string allowed — dev/authless)
         scope        : OAuth scope for client-credentials mode
@@ -56,7 +56,7 @@ class Client:
                        and the callback (see synthigy.login.LoginStore)
         """
         # Validate credentials eagerly (the engine constructs lazily) — same
-        # source order as AsyncClient (PLAN-EXEC-IDENTITY.md step 3), just
+        # source order as AsyncClient, just
         # checked here without actually spending a supervised stdio round
         # trip: only fail fast when NO source is even possible.
         if (token is None and not (client_id and client_secret)
@@ -64,6 +64,7 @@ class Client:
                 and os.environ.get("SYNTHIGY_SUPERVISED") != "1"):
             from .auth import no_token_error
             raise no_token_error()
+        endpoint = resolve_endpoint(endpoint)
         self._config = dict(endpoint=endpoint, client_id=client_id,
                             client_secret=client_secret, token=token,
                             scope=scope, audience=audience, acting_as=acting_as,

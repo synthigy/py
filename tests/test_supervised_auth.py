@@ -1,6 +1,5 @@
 """Contract test for the supervised-stdio token source — spawns the SDK's
-own process under a stub parent speaking `auth.token`, per
-docs/plans/PLAN-EXEC-IDENTITY.md steps 3-4. The child follows the
+own process under a stub parent speaking `auth.token`. The child follows the
 supervised convention (logs/results to stderr, stdout is exclusively the
 control channel) so this test's own bookkeeping never collides with the
 protocol it's exercising."""

@@ -9,31 +9,58 @@ single background event-loop thread — same API scripts and notebooks
 always had, ~1 extra thread total no matter how many watches are open.
 Python ≥ 3.10.
 
-## Install
+## Quick start
+
+**1. Get a server and connect as your app** — steps 1–3 of
+[Code generation](#code-generation).
+
+**2. Install:**
 
 ```bash
-pip install synthigy        # or: uv add synthigy
+pip install synthigy            # or: uv add synthigy — zero dependencies
 ```
 
-No runtime dependencies to resolve. The wheel also installs the
-`synthigy-gen` codegen CLI (equivalently `python3 -m synthigy.codegen`).
-
-## Hello world
+**3. Query:**
 
 ```python
 import synthigy
-from synthigy import eq, gt, rel
 
-synthigy.connect("https://synthigy.example.com",
-                 client_id="my-service",
-                 client_secret=os.environ["SYNTHIGY_SECRET"])
+synthigy.connect()          # endpoint + identity from `synthigy exec`
 
-users = synthigy.search("User",
-    {"active": eq(True), "age": gt(18), "_limit": 10,
-     "_order_by": [["name", "asc"]]},
-    {"name": None, "email": None, "roles": {"name": None}},
-    acting_as=user_xid)
+print(sorted(synthigy.schema()["entities"]))     # what this app can see
+
+# XSQL: the shape you write is the shape you get back
+for ds in synthigy.query("""
+dataset
+  name
+  ->versions
+    name
+"""):
+    print(ds["name"], [v["name"] for v in ds.get("versions", [])])
 ```
+
+```bash
+synthigy exec -- python app.py
+```
+
+That query runs on any instance — `dataset` is the built-in model registry.
+
+**4. Bring your own model.** Deploy a model export (the JSON the modeler
+writes) and every entity in it becomes a table and an API at once:
+
+```python
+with open("My Model@1.0.json") as f:
+    synthigy.deploy(f.read())                # needs the Dataset Developer role
+
+synthigy.stack("movie", {"title": "Dune", "release_year": 2021})
+rows = synthigy.query("movie (release_year >= ?y:int)\n  title\n", {"y": 2021})
+```
+
+**5. Get types** — see [Code generation](#code-generation).
+
+Where to next: [Async-first](#async-first-bffs-fastapiuvicorn-services) for
+FastAPI services, [Logging users in](#logging-users-in-clientlogin) for a
+browser login, [Live data](#live-data) for watches.
 
 ## One process, one client
 
@@ -48,17 +75,20 @@ for tests.
 The async surface IS the engine — no thread hops, native cancellation:
 
 ```python
-synthigy.aconnect(endpoint, client_id=..., client_secret=SECRET)  # once
+synthigy.aconnect()          # once, at startup
 c = synthigy.aclient()
 
-rows = await c.search("Order", {"status": eq("open")}, {"total": None},
-                      acting_as=user.xid)
-await c.stack("Order", {"xid": oxid, "note": "expedite"}, acting_as=user.xid)
+rows = await c.query("""
+movie (release_year > ?y:int, limit 10)
+  title
+""", {"y": 1990}, acting_as=user.xid)
+await c.stack("movie", {"xid": xid, "title": "Dune"}, acting_as=user.xid)
 
-@app.get("/orders/stream")
+@app.get("/movies/stream")
 async def stream(user=Depends(current_user)):
     async def gen():
-        async with c.watch_query("order", acting_as=user.xid) as w:
+        async with c.watch_query_xsql("movie (limit 10)\n  title\n", entity="movie",
+                                      acting_as=user.xid) as w:
             yield render(w.list())
             async for ev in w:            # derived query/* events
                 yield render(w.list())
@@ -84,42 +114,37 @@ loop, and calling it from its own loop thread raises).
 ## Reads
 
 ```python
-rows  = synthigy.search("Movie", {"_limit": 5}, {"title": None})
-movie = synthigy.get("Movie", {"xid": "m-1"}, {"title": None})   # flat unique-key args
-rows  = synthigy.sql_template(
-    "SELECT COUNT(*) AS n FROM {movie} WHERE {movie.release_year} > ?", [1990])
-
-# XSQL — string query surface (server parses/compiles; GraphQL model)
-rows = synthigy.query("""
-movie (release_year > ?y:int, _limit 10)
+rows  = synthigy.query("""
+movie (release_year > ?y:int, limit 10)
   title
   ->genres
     name
 """, {"y": 1990})
+movie = synthigy.query("""
+movie (xid = ?xid:string)
+  title
+""", {"xid": xid}, op="get")                 # one record, or None
+count = synthigy.sql_template(
+    "SELECT COUNT(*) AS n FROM {movie} WHERE {movie.release_year} > ?", [1990])
 ```
 
-- Operators: `eq neq gt gte lt lte in_ nin like ilike is_null is_not_null`
-  and `and_ / or_ / not_` (Python-keyword renames of the JS `and/or/not/in`).
-- Selections mirror the shape you want back: `None` = scalar, nested dict =
-  relation. The server's join default is **LEFT** — a projected relation
-  never drops its parent, and relation args filter the related rows. To
-  scope parents to those HAVING the relation, be explicit:
-  `rel({...}, args={"_join": "inner"})`. The SDK injects nothing.
-- **Empty relations are omitted** by the wire, never `[]` — use
-  `row.get("genres", [])`.
-- Counting/aggregation has **no dedicated op**: use `sql_template` or XSQL
-  `_count`/`_agg` selections.
+- `?name:type=default` are named params, passed as a dict.
+- `->genres` is a **left** pull — a movie with no genres is still returned;
+  `-genres` is **inner** and keeps only movies that have one.
+- **Empty relations are omitted**, never `[]` — use `row.get("genres", [])`.
+- Counting and aggregation compute in the database: `_count` / `_agg` in XSQL,
+  or `sql_template`.
 
 ## Writes
 
 ```python
-synthigy.sync("Movie", {"xid": "m-1", "title": "Dune",
-                        "genres": [{"xid": "g-scifi"}]})   # upsert, REPLACES link-sets
-synthigy.stack("user_rating", {"value": 5, "movie": {"xid": "m-1"}})  # additive
-synthigy.slice("Movie", {"xid": "m-1"}, {"genres": [{"xid": "g-scifi"}]})  # unlink
-synthigy.delete("Movie", {"xid": "m-1"})                   # soft delete
-synthigy.purge("user_rating", {"value": {"_lt": 2}})        # hard delete by filter
+synthigy.sync("movie", {"xid": xid, "title": "Dune"})                  # upsert, REPLACES link-sets
+synthigy.stack("user_rating", {"value": 5, "movie": {"xid": xid}})     # additive
+synthigy.delete("movie", {"xid": xid})                                 # soft delete
 ```
+
+`slice` (unlink without deleting) and `purge` (hard delete by filter) exist
+too.
 
 **Writes are silent by default** — `sync`/`stack` answer `{"count": n}`, not
 the record. Mint the id up front when you need it; that is cheaper than the
@@ -139,8 +164,8 @@ Batch heterogeneous ops in one round trip:
 ```python
 from synthigy import ops
 results = synthigy.exec_([
-    ops.slice("User", {"xid": u}, {"roles": [{"xid": old}]}),
-    ops.stack("User", {"xid": u, "roles": [{"xid": new}]}),
+    ops.query("movie (limit 3)\n  title\n"),
+    ops.stack("user_rating", {"value": 4, "movie": {"xid": xid}}),
 ], acting_as=user_xid)
 ```
 
@@ -151,15 +176,15 @@ re-runs the query through the IAM-filtered read path, so RLS is enforced on
 every refetch.
 
 ```python
-w = synthigy.watch_query("Order", {"status": eq("open")}, {"total": None},
-                         acting_as=user_xid)
+w = synthigy.watch_query_xsql("movie (limit 5, order by release_year desc)\n  title\n",
+                              entity="movie", acting_as=user_xid)
 w.ready()
 for ev in w.events():        # blocking iterator; break to stop
     if ev["type"] in ("query/added", "query/changed", "query/removed"):
         render(w.list())
 
 w2 = synthigy.watch_sql_template(
-    "SELECT COUNT(*) AS n FROM {task}", entities=["task"])
+    "SELECT COUNT(*) AS n FROM {movie}", entities=["movie"])
 w2.ready(); print(w2.first())
 ```
 
@@ -217,7 +242,6 @@ server logs). Discriminate on `.code`, never the message.
   cached token *and* supervises, and only the pipe can refresh mid-run.
   A bot written as `synthigy.Client(endpoint)` — nothing else — therefore
   runs unchanged bare, under `exec`, and under a production commander.
-  See `docs/plans/PLAN-EXEC-IDENTITY.md`.
 - `acting_as` is server-verified impersonation for **trusted confidential**
   clients (the BFF model).
 
@@ -263,52 +287,94 @@ async def callback(code: str = "", state: str = "", error: str = ""):
   different URL than this process does (containers, reverse proxies).
 - The code exchange never retries: an authorization code is one-shot.
 
-## Codegen
+## Code generation
 
-`python3 -m synthigy.codegen` turns an `.xsql` operations document + the
-server schema into one typed Python module (TypedDict rows/params/inputs +
-functions over the module-level verbs). The server owns the XSQL grammar —
-`op:"describe"` compiles the source and returns a language-neutral IR; the
-emitter renders Python from IR JSON and parses nothing.
+Write your queries in `.xsql` files and get typed functions for them. The
+server compiles the queries, so the types always match what it returns.
+
+**1. Get a server.** In your project folder:
 
 ```bash
-# 1. Pull the IAM-filtered schema (commit it)
-SYNTHIGY_CLIENT_ID=... SYNTHIGY_CLIENT_SECRET=... \
-  python3 -m synthigy.codegen pull http://localhost:7887 schema.json
-
-# 2. Describe + generate (saves movies.ir.json beside the .xsql — commit
-#    schema.json + .xsql + .ir.json; after that gen runs OFFLINE forever)
-python3 -m synthigy.codegen gen movies.xsql          # → movies_gen.py
-
-# 3. CI drift gate: offline sourceHash check ("edited .xsql, forgot
-#    codegen"); live describe-diff when SYNTHIGY_* creds are present
-python3 -m synthigy.codegen check movies.xsql
+synthigy env init
+synthigy up
 ```
+
+The first `up` prints a `/setup` link; open it and pick a database. (No
+browser? `synthigy up --db sqlite` skips the wizard.) Already have a server?
+Skip this step.
+
+**2. Deploy your data model** in the modeler (or from code with `synthigy.deploy()`, as a
+client with the Dataset Developer role).
+
+**3. Connect as your app.** Create its client once, then save it to the
+project:
+
+```bash
+synthigy iam add-client "My App" --id my-app --type confidential \
+  --role "Dataset Explorer" --api Synthigy --grant client_credentials --local
+synthigy connect http://localhost:7887 --client-id my-app
+```
+
+`add-client` prints the secret once; `connect` asks for it. Code is generated
+for what this app is allowed to see. (`--local` works on the server's own
+machine; for a remote server, create the client in the console.)
+
+**4. Install the SDK:**
+
+```bash
+pip install synthigy
+```
+
+**5. Write a query** in `xsql/movies.xsql`:
+
+```
+@search list
+movie (release_year > ?since:int=1990, limit ?limit:int=20)
+  xid
+  title
+  release_year
+```
+
+**6. Generate:**
+
+```bash
+synthigy exec -- python -m synthigy.codegen gen xsql/ --out ops.py
+```
+
+This writes `ops.py`, and saves `xsql/schema.json` and `xsql/ops.ir.json`
+next to your queries.
+
+**7. Use it:**
 
 ```python
-import synthigy, movies_gen as ops
-synthigy.connect(endpoint, client_id=..., client_secret=...)
+import synthigy
+import ops
 
-rows  = ops.Movie.list({"since": 2000, "limit": 10})   # list[MovieListRow]
-movie = ops.Movie.detail({"xid": xid})                 # MovieDetailRow | None
-w     = ops.Dashboard.watch_stats(); w.ready()         # @watch variant
-both  = ops.overview()                                 # @batch → ONE round trip
-ops.sync_movie({"title": "Dune", "genres": [{"xid": "g-scifi"}]})
+synthigy.connect()
+movies = ops.Movie.list({"since": 2000})
+print([m["title"] for m in movies])
 ```
 
-Codegen authenticates **as the app** — the same client credentials the app
-uses at runtime. `/schema` and `describe` are IAM-filtered per principal, so
-the generated contract is exactly what the app can do; a personal/dev
-identity would generate a surface the app can't honor. `--no-writes` skips
-the schema-derived `<Entity>Input`/`sync_*`/`stack_*`/`delete_*` tier.
-Empty or unknown op kinds in a saved IR are a hard error (a stale IR is
-never silently emitted from), and data keys stay snake_case verbatim —
-Python native is server native, no casing transform exists.
+```bash
+synthigy exec -- python app.py
+```
 
-An end-to-end example lives in
-[synthigy/examples: music/py](https://github.com/synthigy/examples/tree/main/music/py).
-It ships only the `.xsql`; you run `pull` and `gen` to produce the schema
-snapshot, the IR and the generated module yourself.
+`synthigy exec` gives your program the server address and the app's identity.
+Without it, pass them yourself: `synthigy.connect(endpoint, client_id=..., client_secret=...)`.
+
+**After you edit a query**, run step 6 again. As long as the `.xsql` files are
+unchanged it works offline from `xsql/ops.ir.json`; after an edit it needs the
+server, and it never generates from outdated results. In CI:
+
+```bash
+python -m synthigy.codegen check xsql/
+```
+
+**What to commit:** your `.xsql` files and `xsql/ops.ir.json`.
+`xsql/schema.json` is your whole data model, so commit it only in a private
+repo.
+
+`@watch` ops also get `watch_<name>()`, `@batch` ops become one-round-trip functions, every entity gets typed `sync_<entity>` / `stack_<entity>` / `delete_<entity>`, and each namespace has an `...Async` twin for asyncio apps.
 
 ## Tests
 

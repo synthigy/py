@@ -45,7 +45,7 @@ from .util import new_xid  # noqa: F401
 _default_client = None
 
 
-def connect(endpoint, **config):
+def connect(endpoint=None, **config):
     """Create a client and install it as the module default. Any previous
     default is destroyed first (watches close, SSE drops)."""
     global _default_client
@@ -82,7 +82,7 @@ def _dflt():
 _default_async_client = None
 
 
-def aconnect(endpoint, **config):
+def aconnect(endpoint=None, **config):
     """Create an AsyncClient and install it as the module default — the
     async twin of connect(); same one-process-one-client invariant.
     Generated async typed ops (codegen) run on this default. A previous

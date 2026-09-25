@@ -1,7 +1,6 @@
 """Token manager — OAuth client-credentials against /oauth/token, and the
 supervised-stdio source for a child running under `synthigy exec`/`agent`
-(or the EYWA robotics commander). See docs/plans/PLAN-EXEC-IDENTITY.md
-steps 2-4 for the full contract.
+(or a robotics commander).
 
 Per-audience cache with a 30s pre-expiry buffer. The lock is held across
 the whole refresh (single-flight) so concurrent callers can't stampede
@@ -109,8 +108,7 @@ class _SupervisedIO:
     low-rate, so that's a fine trade against the alternative of racing the
     same audience's refresh.
 
-    Line-sniffing matches the parent's own strict rule (docs/plans/
-    PLAN-EXEC-IDENTITY.md step 3): first byte `{`, parses as JSON, carries
+    Line-sniffing matches the parent's own strict rule: first byte `{`, parses as JSON, carries
     `jsonrpc: "2.0"` — anything else is the child's own stdin traffic (rare,
     but a script could read stdin itself) and is silently dropped, never
     raised as a protocol error. A single malformed/undecodable line must
@@ -190,8 +188,7 @@ class _SupervisedIO:
             {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params},
             separators=(",", ":"))
         try:
-            # Atomic single write + newline (PLAN-EXEC-IDENTITY step 3's
-            # frame rule) — the write lock only serializes concurrent asks
+            # Atomic single write + newline (the frame rule) — the write lock only serializes concurrent asks
             # against each other, it is not held during the wait below.
             with self._write_lock:
                 sys.stdout.write(frame + "\n")
@@ -249,8 +246,7 @@ class _SupervisedIO:
 class SupervisedTokenSource:
     """Token source for SYNTHIGY_SUPERVISED=1 — asks `auth.token` over the
     process's own stdio instead of minting locally (the CLI/commander is
-    the platform's stdio owner; this SDK never mints, per PLAN-EXEC-IDENTITY
-    step 2). Same public shape as TokenManager (`get_token`/`clear`) so
+    the platform's stdio owner; this SDK never mints). Same public shape as TokenManager (`get_token`/`clear`) so
     call sites don't care which source is installed — a thin per-Client
     handle onto the real, process-wide `_SupervisedIO` singleton (cache and
     all), so multiple `Client`s in one process share one cache instead of
@@ -271,7 +267,7 @@ class SupervisedTokenSource:
 
 
 def no_token_error():
-    """The teaching throw — PLAN-EXEC-IDENTITY step 3: the error IS the UX,
+    """The teaching throw: the error IS the UX,
     no flag, no silent anonymous fallback."""
     return SynthigyError(
         "no Synthigy token: set SYNTHIGY_TOKEN, or SYNTHIGY_CLIENT_ID + "
