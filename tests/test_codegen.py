@@ -460,3 +460,41 @@ class TestCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class WarnStaleSchemaTest(unittest.TestCase):
+    def test_warns_only_when_the_stamp_moved(self):
+        import http.server
+        import threading
+
+        class WellKnown(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"datasets":{"A":"2026-09-15T09:47:15.698+02:00",'
+                                 b'"B":"2026-10-01T00:00:00Z"}}')
+
+            def log_message(self, *_):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), WellKnown)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        endpoint = f"http://127.0.0.1:{srv.server_port}"
+        path = Path(tempfile.mkdtemp()) / "schema.json"
+
+        def run(ep):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                codegen.warn_stale_schema(ep, path)
+            return err.getvalue()
+
+        path.write_text('{"datasets":{"A":{"deployed-at":"2026-09-15T07:47:15.698Z"},'
+                        '"B":{"deployed-at":"2026-10-01T00:00:00Z"}}}')
+        self.assertEqual(run(endpoint), "")
+        path.write_text('{"datasets":{"A":{"deployed-at":"2026-09-15T07:47:15.698Z"}}}')
+        self.assertIn("stale", run(endpoint))
+        self.assertEqual(run(None), "")

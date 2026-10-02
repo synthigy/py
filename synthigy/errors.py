@@ -8,7 +8,8 @@ Optional (when the server included them): .details, .hint, .available,
 Discriminate on .code (stable), never .message.
 """
 
-# code → category. Codes not in the table fall back to 'internal'.
+# code → category. Codes not in the table fall back to 'internal', retryable
+# only when the server marks the error retryable.
 ERROR_CATEGORIES = {
     # auth
     "UNAUTHORIZED": "auth",
@@ -25,12 +26,21 @@ ERROR_CATEGORIES = {
     "NO_LOGIN_STORE": "auth",  # client-side: no login store configured — retrying can't fix it
     "LOGIN_NONCE_MISMATCH": "auth",
     "LOGIN_EXCHANGE_FAILED": "auth",
+    "INVALID_CLIENT": "auth",
+    "INVALID_SCOPE": "auth",
+    "INVALID_AUDIENCE": "auth",
     # iam
     "FORBIDDEN": "iam",
     "FORBIDDEN_OP": "iam",
     "ENTITY_FORBIDDEN": "iam",
     "ENTITY_NOT_READABLE": "iam",
     "RELATION_NOT_READABLE": "iam",
+    "RELATION_FORBIDDEN": "iam",
+    "ATTRIBUTE_FORBIDDEN": "iam",
+    "ROW_FORBIDDEN": "iam",
+    "CREATE_FORBIDDEN": "iam",
+    "DELETE_FORBIDDEN": "iam",
+    "SLOT_OCCUPIED": "iam",
     # validation
     "INVALID_BODY": "validation",
     "NO_OPERATIONS": "validation",
@@ -69,6 +79,7 @@ ERROR_CATEGORIES = {
     "RETURN_URL_NOT_REGISTERED": "validation",
     "LOGIN_STATE_UNKNOWN": "validation",
     "LOGIN_REQUIRES_CONFIDENTIAL_CLIENT": "validation",
+    "INVALID_CONTEXT": "validation",
     # not_found
     "UNKNOWN_ENTITY": "not_found",
     "UNKNOWN_RELATION": "not_found",
@@ -87,6 +98,7 @@ ERROR_CATEGORIES = {
     "INTERNAL_ERROR": "internal",
     "OPERATION_ERROR": "internal",
     "HTTP_ERROR": "internal",
+    "OPERATION_FAILED": "internal",
 }
 
 RETRYABLE_CATEGORIES = {"network", "rate_limit", "internal"}
@@ -100,12 +112,14 @@ _EXTRA_FIELDS = (
 
 class SynthigyError(Exception):
     def __init__(self, message, code, details=None, *, request_id=None,
-                 status=None, **extras):
+                 status=None, retryable=None, **extras):
         super().__init__(message)
         self.message = message
         self.code = code
         self.category = ERROR_CATEGORIES.get(code, "internal")
-        self.retryable = self.category in RETRYABLE_CATEGORIES
+        self.retryable = (retryable if isinstance(retryable, bool)
+                          else code in ERROR_CATEGORIES
+                          and self.category in RETRYABLE_CATEGORIES)
         if details is not None:
             self.details = details
         if request_id is not None:
@@ -129,5 +143,6 @@ def error_from_server(err, status=None, request_id=None):
         err.get("details"),
         request_id=request_id,
         status=status,
+        retryable=err.get("retryable"),
         **{k: err.get(k) for k in _EXTRA_FIELDS},
     )

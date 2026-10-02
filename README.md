@@ -219,11 +219,18 @@ sends them: `.hint`, `.entity`, `.path`, `.line`/`.col`, `.diagnostics`,
 `.request_id` (matches the `X-Request-Id` the SDK sends — correlate with
 server logs). Discriminate on `.code`, never the message.
 
+`.retryable` is true for `network`, `rate_limit` and `internal` codes, and for
+any error the server marks retryable. A code this SDK doesn't know yet is
+category `internal` but not retryable.
+
 ## Auth
 
 - Client credentials (`client_id`+`client_secret`): tokens minted from
   `/oauth/token`, cached per audience, refreshed 30s before expiry,
-  single-flight; one automatic clear-and-retry on 401.
+  single-flight; one automatic clear-and-retry on 401. A refused mint is
+  `INVALID_CLIENT` (wrong id or secret, inactive client), `INVALID_SCOPE`, or
+  `INVALID_AUDIENCE` (the client isn't linked to the API), else
+  `UNAUTHORIZED`; the message carries the server's `error_description`.
 - `audience=` (or `$SYNTHIGY_AUDIENCE`): binds one audience to every mint this
   client makes. The platform's audience model is **opt-in by design** — a token
   minted naming no audience resolves to an identity-only audience that `/data`

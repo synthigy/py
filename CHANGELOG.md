@@ -3,6 +3,33 @@
 All notable changes to `synthigy` (PyPI). Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.3.1
+
+### Fixed
+- **A login may take 10 minutes, not 5** (`MemoryLoginStore()`'s default,
+  `synthigy.login.LOGIN_TTL_SECONDS`). Synthigy's login page allows 8, so a
+  user who took 5–8 minutes logged in there and then failed the callback with
+  `LOGIN_STATE_UNKNOWN`.
+- **`login.complete()` and `login.cancel()` refuse a login older than that
+  themselves.** Expiry used to live only in the store, so a custom store that
+  never expired accepted a login of any age.
+- **Permission denials are `iam`, not retryable `internal`.**
+  `RELATION_FORBIDDEN`, `ATTRIBUTE_FORBIDDEN`, `ROW_FORBIDDEN`,
+  `CREATE_FORBIDDEN`, `DELETE_FORBIDDEN` and `SLOT_OCCUPIED` were missing from
+  the code table, so a denied relation read came back as a retryable server
+  error.
+- **A code the SDK doesn't know is no longer retryable.** It stays category
+  `internal`, but `.retryable` is true only when the server marks the error
+  retryable (it does for transient database failures) or the code is a known
+  `network`/`rate_limit`/`internal` one. `SynthigyError(..., retryable=)`
+  takes the server's flag.
+- **A refused token mint says why.** `invalid_client` → `INVALID_CLIENT` (with
+  a `.hint` to check the client id and secret), `invalid_scope` →
+  `INVALID_SCOPE`, `invalid_target` → `INVALID_AUDIENCE`; other refusals stay
+  `UNAUTHORIZED`. A wrong secret used to read the same as an expired session.
+- `INVALID_CONTEXT` (the blocking `Client` called from its own event-loop
+  thread) is category `validation`, no longer retryable `internal`.
+
 ## 0.3.0
 
 ### Added

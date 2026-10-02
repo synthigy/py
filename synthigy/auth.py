@@ -19,17 +19,28 @@ import urllib.request
 from .errors import SynthigyError
 
 
+# RFC 6749 §5.2 / RFC 8707 refusals with their own code; any other is UNAUTHORIZED.
+_REFUSAL_CODES = {
+    "invalid_client": "INVALID_CLIENT",
+    "invalid_scope": "INVALID_SCOPE",
+    "invalid_target": "INVALID_AUDIENCE",
+}
+
+
 def token_request_error(status, body):
-    """Map an /oauth/token refusal to UNAUTHORIZED, keeping the RFC 6749 error."""
+    """Map an /oauth/token refusal to a typed error, keeping the RFC 6749 error."""
     text = body.decode("utf-8", "replace")
     try:
         oauth = json.loads(text)
     except ValueError:
         oauth = None
-    if isinstance(oauth, dict) and oauth.get("error"):
+    if isinstance(oauth, dict) and isinstance(oauth.get("error"), str) and oauth["error"]:
         desc = oauth.get("error_description")
         msg = f"token request refused ({status}): {oauth['error']}" + (f" — {desc}" if desc else "")
-        return SynthigyError(msg, "UNAUTHORIZED", oauth, status=status)
+        code = _REFUSAL_CODES.get(oauth["error"], "UNAUTHORIZED")
+        hint = ("check the client id and secret, and that the client is active"
+                if code == "INVALID_CLIENT" else None)
+        return SynthigyError(msg, code, oauth, status=status, hint=hint)
     return SynthigyError(f"token request failed ({status}): {text}",
                          "UNAUTHORIZED", status=status)
 

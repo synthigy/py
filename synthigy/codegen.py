@@ -42,6 +42,8 @@ import os
 import py_compile
 import re
 import sys
+import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 from .facade import Client
@@ -746,6 +748,33 @@ def _ir_path(dir_):
     return dir_ / "ops.ir.json"
 
 
+def _instant(s):
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return s
+
+
+def warn_stale_schema(endpoint, schema_path):
+    """One stderr line when schema_path's deploy stamp is older than the model at
+    /.well-known/synthigy. Silent on any failure: generation stays offline-capable."""
+    if not endpoint or not Path(schema_path).exists():
+        return
+    try:
+        local = json.loads(Path(schema_path).read_text()).get("datasets") or {}
+        url = endpoint.rstrip("/") + "/.well-known/synthigy"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            remote = json.load(resp).get("datasets") or {}
+    except Exception:
+        return
+    changed = [i for i, at in remote.items()
+               if i not in local or _instant(local[i].get("deployed-at")) != _instant(at)]
+    changed += [i for i in local if i not in remote]
+    if changed:
+        print(f"warning: {schema_path} is stale against {endpoint} ({len(changed)} datasets "
+              "changed since the pull) — re-run with --pull", file=sys.stderr)
+
+
 def _load_ir(ir_path, source, files, *, endpoint, force_pull=False, offline_ok=True):
     """Cached IR when it matches the sources on disk; otherwise a live
     describe. NEVER returns an IR that disagrees with the sources."""
@@ -787,12 +816,16 @@ def cmd_gen(args):
         ir_path.write_text(json.dumps(ir, indent=2) + "\n")
 
     schema = None
+    schema_path = _resolve_schema_path(dir_, args.schema)
+    pulled = False
     if args.writes:
-        schema_path = _resolve_schema_path(dir_, args.schema)
         if args.pull or not schema_path.exists():
             schema = pull_schema(args.endpoint, schema_path)
+            pulled = True
         else:
             schema = json.loads(schema_path.read_text())
+    if not pulled:
+        warn_stale_schema(args.endpoint, schema_path)
 
     out = Path(args.out) if args.out else _default_out(args.inputs, dir_)
     if out.is_dir():

@@ -254,6 +254,26 @@ class TestErrors(ClientTestCase):
         self.assertEqual(e.hint, "User")
         self.assertFalse(e.retryable)
 
+    def test_relation_denial_is_iam(self):
+        self.srv.route("/data", (200, {"results": [{
+            "ok": False,
+            "error": {"message": "no", "code": "RELATION_FORBIDDEN", "relation": "r1"}}]}))
+        with self.assertRaises(SynthigyError) as cm:
+            self.static_client().search("User", None, None)
+        e = cm.exception
+        self.assertEqual((e.code, e.category, e.retryable), ("RELATION_FORBIDDEN", "iam", False))
+
+    def test_unknown_code_retryable_only_when_server_says_so(self):
+        self.assertEqual(SynthigyError("x", "SOME_FUTURE_CODE").category, "internal")
+        self.assertFalse(SynthigyError("x", "SOME_FUTURE_CODE").retryable)
+        for error, retryable in (({"code": "DB_UNAVAILABLE", "retryable": True}, True),
+                                 ({"code": "DB_UNAVAILABLE"}, False)):
+            self.srv.route("/data", (200, {"results": [{
+                "ok": False, "error": {"message": "x", **error}}]}))
+            with self.assertRaises(SynthigyError) as cm:
+                self.static_client().search("User", None, None)
+            self.assertEqual(cm.exception.retryable, retryable)
+
     def test_batch_continues_after_per_op_failure(self):
         self.srv.route("/data", (200, {"results": [
             {"ok": False, "error": {"message": "x", "code": "FK_VIOLATION"}},
@@ -344,9 +364,34 @@ class TestAuth(ClientTestCase):
         with self.assertRaises(SynthigyError) as ctx:
             c.search("User", None, None)
         e = ctx.exception
-        self.assertEqual((e.code, e.status, e.retryable), ("UNAUTHORIZED", 400, False))
+        self.assertEqual((e.code, e.category, e.status, e.retryable),
+                         ("INVALID_AUDIENCE", "auth", 400, False))
         self.assertEqual(e.details["error"], "invalid_target")
         self.assertIn("not authorized for audience", e.message)
+
+    def test_wrong_secret_is_invalid_client(self):
+        self.srv.route("/oauth/token", (401, {
+            "error": "invalid_client",
+            "error_description": "Client authentication failed"}))
+        c = Client(self.srv.endpoint, client_id="id", client_secret="wrong")
+        with self.assertRaises(SynthigyError) as ctx:
+            c.search("User", None, None)
+        e = ctx.exception
+        self.assertEqual((e.code, e.category, e.status, e.retryable),
+                         ("INVALID_CLIENT", "auth", 401, False))
+        self.assertEqual(e.message,
+                         "token request refused (401): invalid_client — Client authentication failed")
+        self.assertIn("client id and secret", e.hint)
+
+    def test_other_token_refusals(self):
+        for body, code in (({"error": "invalid_scope"}, "INVALID_SCOPE"),
+                           ({"error": "unauthorized_client"}, "UNAUTHORIZED")):
+            self.srv.route("/oauth/token", (400, body))
+            c = Client(self.srv.endpoint, client_id="id", client_secret="s")
+            with self.assertRaises(SynthigyError) as ctx:
+                c.search("User", None, None)
+            self.assertEqual((ctx.exception.code, ctx.exception.retryable), (code, False))
+            self.assertFalse(hasattr(ctx.exception, "hint"))
 
     def test_token_endpoint_unreachable_is_network_error(self):
         c = Client("http://127.0.0.1:9", client_id="id", client_secret="s",

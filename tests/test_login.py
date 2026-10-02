@@ -9,7 +9,7 @@ import urllib.parse
 
 import synthigy
 from synthigy import AsyncClient, Client, MemoryLoginStore, SynthigyError
-from synthigy.login import LoginStore, b64url
+from synthigy.login import LOGIN_TTL_SECONDS, LoginStore, b64url
 
 from test_client import StubServer
 
@@ -34,6 +34,19 @@ class RecordingStore(MemoryLoginStore):
     def put(self, state, login):
         self.puts.append((state, dict(login)))
         super().put(state, login)
+
+
+class ForeverStore:
+    """Never expires anything, like a hand-rolled store that forgot to."""
+
+    def __init__(self, **pending):
+        self.d = dict(pending)
+
+    def put(self, state, login):
+        self.d[state] = login
+
+    def take(self, state):
+        return self.d.pop(state, None)
 
 
 class AsyncStore:
@@ -227,6 +240,21 @@ class TestStores(LoginTestCase):
         self.assertIsNone(s.take("old"))
         self.assertIsNotNone(s.take("new"))
         self.assertIsNone(s.take("new"))
+
+    def test_default_ttl_outlives_the_servers_login_window(self):
+        s = MemoryLoginStore()
+        s.put("slow", {"created_at": time.time() - 9 * 60})
+        self.assertIsNotNone(s.take("slow"))
+
+    def test_expired_login_refused_even_when_the_store_kept_it(self):
+        old = {"code_verifier": "v", "nonce": "n", "return_to": "/back",
+               "created_at": int(time.time()) - LOGIN_TTL_SECONDS - 1}
+        c = self.client(login_store=ForeverStore(done=dict(old), cancelled=dict(old)))
+        with self.assertRaises(SynthigyError) as cm:
+            c.login.complete(code="c", state="done", redirect_uri=REDIRECT)
+        self.assertEqual(cm.exception.code, "LOGIN_STATE_UNKNOWN")
+        self.assertIsNone(c.login.cancel("cancelled"))
+        self.assertEqual(self.srv.requests_to("/oauth/token"), [])
 
     def test_memory_store_sweeps_on_put(self):
         s = MemoryLoginStore(ttl_seconds=60)

@@ -23,7 +23,8 @@ from .errors import SynthigyError
 
 PKCE_VERIFIER_BYTES = 32
 STATE_BYTES = 24
-DEFAULT_TTL_SECONDS = 300
+# must exceed the server's 8-minute login window, or slow logins fail LOGIN_STATE_UNKNOWN
+LOGIN_TTL_SECONDS = 600
 
 
 def b64url(raw):
@@ -100,7 +101,7 @@ class MemoryLoginStore:
     already holds their sessions (Redis, Postgres, a signed cookie).
     """
 
-    def __init__(self, ttl_seconds=DEFAULT_TTL_SECONDS):
+    def __init__(self, ttl_seconds=LOGIN_TTL_SECONDS):
         self._ttl = ttl_seconds
         self._pending = {}
 
@@ -202,7 +203,7 @@ class AsyncLoginAPI:
         """
         self._require_confidential()
         c = self._client
-        pending = await maybe_await(c._login_store.take(state)) if state else None
+        pending = await self._take(state)
         if not pending:
             raise SynthigyError(
                 "unknown or expired login state: the store never saw it, it "
@@ -276,5 +277,12 @@ class AsyncLoginAPI:
         4.1.2.1 sends `error` back with no code), so an unknown state is None
         here rather than a raise.
         """
-        pending = await maybe_await(self._client._login_store.take(state)) if state else None
+        pending = await self._take(state)
         return {"return_to": pending["return_to"]} if pending else None
+
+    async def _take(self, state):
+        """Take a pending login, refusing one older than LOGIN_TTL_SECONDS even when the store kept it."""
+        pending = await maybe_await(self._client._login_store.take(state)) if state else None
+        if pending and pending.get("created_at", 0) > time.time() - LOGIN_TTL_SECONDS:
+            return pending
+        return None
