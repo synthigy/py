@@ -141,6 +141,7 @@ def onboard_complete(*a, **kw): return _dflt().onboard_complete(*a, **kw)
 def deploy(*a, **kw): return _dflt().deploy(*a, **kw)
 def destroy(*a, **kw): return _dflt().destroy(*a, **kw)
 def deployed_model(*a, **kw): return _dflt().deployed_model(*a, **kw)
+def whoami(*a, **kw): return _dflt().whoami(*a, **kw)
 def runtime_model(*a, **kw): return _dflt().runtime_model(*a, **kw)
 def token(*a, **kw): return _dflt().token(*a, **kw)
 def history(): return _dflt().history

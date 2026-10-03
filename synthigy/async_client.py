@@ -1700,6 +1700,11 @@ class AsyncClient:
     async def deployed_model(self, **opts):
         return await self._one({"op": "deployed-model"}, **opts)
 
+    async def whoami(self, **opts):
+        """Who a call runs as, after acting_as: xid, name, active, superuser,
+        roles, groups, and client {id, trusted} — trusted = may act as users."""
+        return await self._one({"op": "whoami"}, **opts)
+
     async def runtime_model(self, **opts):
         return await self._one({"op": "runtime-model"}, **opts)
 

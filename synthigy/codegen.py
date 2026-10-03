@@ -2,8 +2,6 @@
 
 Usage (python3 -m synthigy.codegen <cmd>):
 
-    pull <endpoint> [out]                       pull the IAM-filtered schema
-                                                → schema.json
     gen <xsql...> [--schema P] [--out P]        describe + render Python
                   [--no-writes] [--pull]        (saves ops.ir.json)
                   [--endpoint URL]
@@ -907,10 +905,6 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="cmd", required=True)
     default_ep = os.environ.get("SYNTHIGY_ENDPOINT")
 
-    p = sub.add_parser("pull", help="pull the IAM-filtered schema")
-    p.add_argument("endpoint", nargs="?", default=default_ep)
-    p.add_argument("out", nargs="?", default="schema.json")
-
     g = sub.add_parser("gen", help="describe + generate a typed Python module")
     g.add_argument("inputs", nargs="+", metavar="xsql",
                    help=".xsql files and/or directories (searched recursively)")
@@ -928,9 +922,6 @@ def main(argv=None):
     c.add_argument("--endpoint", default=default_ep)
 
     args = parser.parse_args(argv)
-    if args.cmd == "pull":
-        pull_schema(args.endpoint, args.out)
-        return 0
     if args.cmd == "gen":
         return cmd_gen(args)
     return cmd_check(args)

@@ -250,7 +250,8 @@ category `internal` but not retryable.
   A bot written as `synthigy.Client(endpoint)` — nothing else — therefore
   runs unchanged bare, under `exec`, and under a production commander.
 - `acting_as` is server-verified impersonation for **trusted confidential**
-  clients (the BFF model).
+  clients (the BFF model). `whoami(acting_as=xid)` shows who a call runs as —
+  roles, superuser, and whether this client may act as users at all.
 
 ### Logging users in (`client.login`)
 

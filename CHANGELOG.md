@@ -3,6 +3,20 @@
 All notable changes to `synthigy` (PyPI). Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.3.2
+
+### Added
+- **`whoami(acting_as=)`** on `Client`, `AsyncClient` and the module (plus
+  `ops.whoami()`) — who a call runs as: xid, name, active, superuser, roles
+  (group-conferred included), groups, and `client` `{id, trusted}`, where
+  `trusted` means this client may act as users. Needs engine v0.2.11 or newer.
+
+### Removed
+- **`python -m synthigy.codegen pull`.** It wrote `./schema.json` in the
+  working directory while `gen` reads `schema.json` beside the `.xsql` files.
+  `gen --pull` refreshes the file `gen` reads; `synthigy schema pull` writes
+  the same `xsql/schema.json`.
+
 ## 0.3.1
 
 ### Fixed

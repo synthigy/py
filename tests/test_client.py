@@ -134,6 +134,15 @@ class TestEnvelope(ClientTestCase):
         c.search("User", None, None, acting_as="u-override")
         self.assertEqual(self.last_data_body()["acting_as"], "u-override")
 
+    def test_whoami(self):
+        me = {"xid": "x-bgates", "name": "bgates", "active": True, "superuser": False,
+              "roles": ["Viewer"], "groups": [], "client": {"id": "viewer", "trusted": True}}
+        self.srv.route("/data", (200, ok_results(me)))
+        self.assertEqual(self.static_client().whoami(acting_as="x-bgates"), me)
+        body = self.last_data_body()
+        self.assertEqual(body["operations"], [{"op": "whoami"}])
+        self.assertEqual(body["acting_as"], "x-bgates")
+
     def test_key_format_precedence(self):
         self.srv.route("/data", (200, ok_results([])))
         c = self.static_client(key_format="kebab")

@@ -81,5 +81,9 @@ def deployed_model():
     return {"op": "deployed-model"}
 
 
+def whoami():
+    return {"op": "whoami"}
+
+
 def runtime_model():
     return {"op": "runtime-model"}

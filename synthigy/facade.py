@@ -199,6 +199,9 @@ class Client:
     def deployed_model(self, **kw):
         return self._call("deployed_model", **kw)
 
+    def whoami(self, **kw):
+        return self._call("whoami", **kw)
+
     def runtime_model(self, **kw):
         return self._call("runtime_model", **kw)
 
