@@ -20,7 +20,7 @@ noted):
   - ops: search/get/query(XSQL)/sql_template, sync/stack/slice/delete/
     purge, exec_ (batch), search_tree/get_tree (composed), deployed/
     runtime model, schema, lint, history (get_at/events/diff/timeline/
-    since)
+    since), files (/files bytes, versions, folders)
   - streaming: listen() (raw SSE envelopes, infinite reconnect with
     Last-Event-ID resume), observe() (one-call live primitive with
     re-register-per-session + optional /history backfill across gaps)
@@ -58,6 +58,7 @@ import urllib.parse
 from .backfill import fold_history_events
 from .compose import compose_forest, compose_tree
 from .errors import SynthigyError, error_from_server
+from .files import AsyncFilesAPI
 from .events import (
     REFRESH_COALESCE, _collect_all_xids, _diff_row, _event_matches_descriptor,
     _row_key, _rows_equal, _union_changed, descriptor_key, kebab, matches,
@@ -190,7 +191,9 @@ class _AsyncPool:
             will_close = conn_hdr != "keep-alive"
         else:
             will_close = conn_hdr == "close"
-        if "content-length" in resp_headers:
+        if status in (204, 304) or 100 <= status < 200:
+            data = b""  # bodiless by definition; reading to EOF would hang on keep-alive
+        elif "content-length" in resp_headers:
             n = int(resp_headers["content-length"])
             data = await conn.reader.readexactly(n) if n else b""
         elif resp_headers.get("transfer-encoding", "").lower() == "chunked":
@@ -1839,6 +1842,14 @@ class AsyncClient:
         if not hasattr(self, "_history"):
             self._history = AsyncHistoryAPI(self)
         return self._history
+
+    @property
+    def files(self):
+        """Files (/files): put / download / info / list / search / delete / url /
+        move / folder / share / unshare / access / versions / restore / serve."""
+        if not hasattr(self, "_files"):
+            self._files = AsyncFilesAPI(self)
+        return self._files
 
     @property
     def login(self):

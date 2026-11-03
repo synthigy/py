@@ -145,6 +145,7 @@ def whoami(*a, **kw): return _dflt().whoami(*a, **kw)
 def runtime_model(*a, **kw): return _dflt().runtime_model(*a, **kw)
 def token(*a, **kw): return _dflt().token(*a, **kw)
 def history(): return _dflt().history
+def files(): return _dflt().files
 def login(): return _dflt().login
 
 

@@ -10,7 +10,8 @@ Shorthands (mixable at any nesting level):
 Join semantics are the SERVER's: absent "_join" is LEFT (a selection is a
 projection and never drops parents; relation args filter the related rows).
 The client injects nothing — pass {"_join": "inner"} explicitly when the
-relation's existence should scope its parent.
+relation's existence should scope its parent, or "none" to keep only parents
+with no matching related row.
 """
 
 

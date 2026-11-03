@@ -3,6 +3,50 @@
 All notable changes to `synthigy` (PyPI). Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.3.3
+
+Needs engine v0.4.1 or newer for files.
+
+### Added
+- **`client.files`** (and `synthigy.files()`, `AsyncClient.files`): `put` (a
+  path creates or replaces the file there, its folder must exist; an xid or
+  file replaces it; `{"name": ...}` makes a file in no folder; `if_match`),
+  `download` (`byte_range`, `if_none_match`, `version`), `info`, `list` (a
+  folder's `{"files", "folders"}`; `None`: files in no folder; omitted: every
+  file you can see; `q` (words in order, a space for anything between),
+  `limit`, `offset`), `search` (folders and files whose paths hold the words in
+  order, shortest path first), `delete` (a file, or an empty folder), `url` (a
+  link without a request, `inline`), `move` (a file or a folder), `folder` (made
+  with every missing folder above it; `public`, `cache`), `share`, `unshare`,
+  `access`, `versions`, `restore` and `serve` (`(status, headers, body)` that
+  passes Range and 304 through). A file is a path, an xid or the file; a
+  folder a path ending in `/`, an xid or the folder. New error codes:
+  `FILE_NOT_FOUND`, `FOLDER_NOT_FOUND`, `FILES_UNAVAILABLE`,
+  `AUDIT_UNAVAILABLE`, `VERSION_EXPIRED`, `NOT_FOUND` → `not_found`;
+  `FILE_NAME_TAKEN`, `FILE_CHANGED`, `FILE_NOT_READY`, `FOLDER_NAME_TAKEN`,
+  `FOLDER_NOT_EMPTY`, `FOLDER_CYCLE` → `conflict`; `NAME_REQUIRED`,
+  `INVALID_NAME`, `INVALID_ACCESS`, `INVALID_PATH`, `INVALID_SETTINGS`,
+  `INVALID_QUERY`, `METHOD_NOT_ALLOWED`, `INVALID_SLICE`, `FILE_TOO_LARGE`,
+  `UNSUPPORTED_MEDIA_TYPE`, `RANGE_NOT_SATISFIABLE` → `validation`. Needs a
+  server with the files module and File System 0.3.10.
+
+### Fixed
+- **A 204 or 304 answer no longer hangs the call.** The transport read a response
+  without `Content-Length` until the connection closed, which a keep-alive server
+  never does. Bodiless statuses (1xx, 204, 304) now end at their headers.
+
+### Changed
+- Error categories for the deploy checks: `SYSTEM_DATASET_ENGINE_OWNED` and
+  `SYSTEM_ENTITY_ALTERED` → `iam` (a superuser may); `ENTITY_NAME_CONFLICT`,
+  `FIELD_KEY_CONFLICT` and `IMMUTABLE_VERSION_ALTERED` → `validation`. They used to
+  fall back to `internal`.
+- `UNKNOWN_TREE_RELATION` (the engine refuses an `on` of a tree op that is not a tree relation of
+  the entity) → `validation`.
+- More codes categorized: `ENGINE_OWNED` (a meta-model row or field only deploy and
+  recall write) → `iam`; `SYSTEM_ENTITY_RLS`, `RLS_GUARD_BROKEN` and
+  `VERSION_NAME_TAKEN` → `validation`; `MODEL_BUSY` (another deploy, recall or destroy
+  is running; retry when it finishes) → `conflict`.
+
 ## 0.3.2
 
 ### Added

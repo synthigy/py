@@ -234,6 +234,14 @@ class Client:
         return self._history_api
 
     @property
+    def files(self):
+        """Files (/files): put / download / info / list / search / delete / url /
+        move / folder / share / unshare / access / versions / restore / serve."""
+        if not hasattr(self, "_files_api"):
+            self._files_api = FilesAPI(self)
+        return self._files_api
+
+    @property
     def login(self):
         """OIDC authorization-code + PKCE: start / complete / cancel."""
         if not hasattr(self, "_login_api"):
@@ -315,6 +323,60 @@ class Client:
         """Entity-touch poke channel — raw entity/touched events."""
         c = self._ensure_started()
         return EntityWatch(self, c.watch_entities(*entities))
+
+
+class FilesAPI:
+    def __init__(self, facade):
+        self._facade = facade
+
+    def _call(self, method, *a, **kw):
+        c = self._facade._ensure_started()
+        return self._facade._await(getattr(c.files, method)(*a, **kw))
+
+    def put(self, *a, **kw):
+        return self._call("put", *a, **kw)
+
+    def download(self, *a, **kw):
+        return self._call("download", *a, **kw)
+
+    def info(self, *a, **kw):
+        return self._call("info", *a, **kw)
+
+    def list(self, *a, **kw):
+        return self._call("list", *a, **kw)
+
+    def search(self, *a, **kw):
+        return self._call("search", *a, **kw)
+
+    def delete(self, *a, **kw):
+        return self._call("delete", *a, **kw)
+
+    def url(self, *a, **kw):
+        return self._facade._ensure_started().files.url(*a, **kw)
+
+    def move(self, *a, **kw):
+        return self._call("move", *a, **kw)
+
+    def folder(self, *a, **kw):
+        return self._call("folder", *a, **kw)
+
+    def share(self, *a, **kw):
+        return self._call("share", *a, **kw)
+
+    def unshare(self, *a, **kw):
+        return self._call("unshare", *a, **kw)
+
+    def access(self, *a, **kw):
+        return self._call("access", *a, **kw)
+
+    def versions(self, *a, **kw):
+        return self._call("versions", *a, **kw)
+
+    def restore(self, *a, **kw):
+        return self._call("restore", *a, **kw)
+
+    def serve(self, *a, **kw):
+        return self._call("serve", *a, **kw)
 
 
 class HistoryAPI:

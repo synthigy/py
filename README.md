@@ -130,7 +130,8 @@ count = synthigy.sql_template(
 
 - `?name:type=default` are named params, passed as a dict.
 - `->genres` is a **left** pull — a movie with no genres is still returned;
-  `-genres` is **inner** and keeps only movies that have one.
+  `-genres` is **inner** and keeps only movies that have one; `!genres` keeps
+  only movies with none (filters allowed, no fields under it).
 - **Empty relations are omitted**, never `[]` — use `row.get("genres", [])`.
 - Counting and aggregation compute in the database: `_count` / `_agg` in XSQL,
   or `sql_template`.
@@ -210,13 +211,69 @@ h.diff(xid, t1, t2)
 
 Raises `HISTORY_UNAVAILABLE` when the server has no audit provider.
 
+## Files
+
+`client.files` speaks the engine's `/files` endpoints: the bytes, their
+versions and folders, under the same access control as your data. Each file
+is also a `File` record on `/data`. A file is a path (`"/site/img/logo.png"`),
+an xid or the file; a folder is a path ending in `/` (`"/"` is ROOT), an xid or
+the folder.
+
+```python
+files = synthigy.files()
+files.folder("/site/img/")                      # made with every missing folder above it
+with open("logo.png", "rb") as f:
+    fi = files.put("/site/img/logo.png", f)     # creates, or replaces (the old bytes stay a version)
+# fi["xid"], fi["size"], fi["hash"] (SHA-256, the download ETag), fi["uploaded_by"]["name"]
+
+data = files.download("/site/img/logo.png")     # bytes; byte_range=(0, 1023) for part of it
+files.put(fi, new_bytes, if_match=fi)           # FILE_CHANGED if someone was first
+files.put({"name": "scan.pdf"}, data)           # a new file in no folder, every time
+files.list("/site/")                            # {"files", "folders"}; None: no folder; omitted: every file
+files.search("site logo")                       # paths holding the words in order, shortest first
+files.move("/site/img/logo.png", "/brand/")     # keeps the name; never overwrites
+files.move("/site/img/", "/assets/img/")        # a folder
+vs = files.versions(fi)                         # the last ten, newest first
+files.restore(fi, vs[1])
+files.share("/site/", "read", users=[user_xid])
+files.delete("/site/img/logo.png")              # or an empty folder: "/site/img/"
+```
+
+`put` never creates folders (a missing one is `FOLDER_NOT_FOUND`); `folder`
+does. `put` takes bytes, a `str` (sent as UTF-8 text) or a binary file.
+`download(if_none_match=hash)` answers `None` while the file is unchanged;
+`info` answers `None` for a file you cannot see.
+
+A browser cannot send your token (`<img src>`, a link in an email). Files in a
+public folder load from a plain link, built without a request; `serve`
+answers a browser's request from your server with your token, Range and 304
+included:
+
+```python
+files.folder("/site/", public=True, cache=86400)
+src = files.url("/site/img/logo.png")           # or an xid; inline=True opens it in the browser
+status, headers, body = files.serve("/private/logo.png", request.headers)
+```
+
+A folder's own `public` and `cache` win, else the nearest folder above that
+has one (`None` clears its own); the folder shows what applies as `public`
+and `cache`, what is set on it under `settings`. File User may set the cache
+but not public (`ATTRIBUTE_FORBIDDEN`).
+
+One put carries up to the server's `SYNTHIGY_SERVER_MAX_BODY` (25 MB by
+default). The engine's [files guide](https://github.com/synthigy/synthigy/blob/main/docs/FILES.md)
+covers storage, access and retention; error codes include `FILE_NOT_FOUND`,
+`FOLDER_NOT_FOUND`, `FILE_CHANGED`, `FILE_TOO_LARGE`, `VERSION_EXPIRED`,
+`INVALID_PATH`, `AUDIT_UNAVAILABLE` and `FILES_UNAVAILABLE` (no files module
+on the server).
+
 ## Errors
 
 Everything raises `synthigy.SynthigyError` with stable `.code`, derived
 `.category` (`auth | iam | validation | not_found | conflict | rate_limit |
 network | internal`) and `.retryable`. Structured fields when the server
 sends them: `.hint`, `.entity`, `.path`, `.line`/`.col`, `.diagnostics`,
-`.request_id` (matches the `X-Request-Id` the SDK sends — correlate with
+`.request_id` (the `X-Request-Id` the server answered with — correlate with
 server logs). Discriminate on `.code`, never the message.
 
 `.retryable` is true for `network`, `rate_limit` and `internal` codes, and for
@@ -231,14 +288,12 @@ category `internal` but not retryable.
   `INVALID_CLIENT` (wrong id or secret, inactive client), `INVALID_SCOPE`, or
   `INVALID_AUDIENCE` (the client isn't linked to the API), else
   `UNAUTHORIZED`; the message carries the server's `error_description`.
-- `audience=` (or `$SYNTHIGY_AUDIENCE`): binds one audience to every mint this
-  client makes. The platform's audience model is **opt-in by design** — a token
-  minted naming no audience resolves to an identity-only audience that `/data`
-  rejects, so without this every data call 401s. Set it to the server's `/data`
-  audience, published at `/.well-known/synthigy` as `auth.oidc.audience`. Left
-  unset the SDK names no audience, so an unentitled client keeps a soft 401
-  rather than a hard `invalid_target`. `client.token(audience)` still overrides
-  per call, for minting tokens aimed at a *different* audience.
+- `audience=` (or `$SYNTHIGY_AUDIENCE`): leave it unset. Every mint names
+  `PLATFORM_AUDIENCE` (`https://synthigy.com`), the audience `/data` and the
+  other platform endpoints require; a token naming no audience would get an
+  identity-only one that `/data` rejects. A client not linked to the platform
+  API fails the mint with `INVALID_AUDIENCE`. `client.token(audience)` mints
+  for a *different* API, per call.
 - Static `token="..."` for scripts/tests (`token=""` for authless dev).
 - With none of the above, resolution continues: under
   `SYNTHIGY_SUPERVISED=1` the SDK asks its supervising parent
@@ -308,7 +363,7 @@ synthigy up
 ```
 
 The first `up` prints a `/setup` link; open it and pick a database. (No
-browser? `synthigy up --db sqlite` skips the wizard.) Already have a server?
+browser? `synthigy up --bundle sqlite` skips the wizard.) Already have a server?
 Skip this step.
 
 **2. Deploy your data model** in the modeler (or from code with `synthigy.deploy()`, as a
@@ -399,7 +454,17 @@ its own code-flow client plus a password user:
 `SYNTHIGY_TEST_LOGIN_CLIENT_ID/_SECRET/_USER/_PASSWORD` (setup snippet in
 `tests/test_integration.py`).
 
+`tests.test_files_live` runs `client.files` and `AsyncClient.files` against an
+engine with the files module, as three client-credentials clients whose service
+users hold File Admin, File User and File Reader. It skips unless
+`SYNTHIGY_FILES_TEST_ENDPOINT` and
+`SYNTHIGY_FILES_TEST_{ADMIN,USER,READER}_{ID,SECRET}` are set:
+
+```bash
+python3 -m unittest tests.test_files_live -v
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE). The SDKs are permissive client libraries; the
-Synthigy engine is fair-code under the Sustainable Use License.
+Synthigy engine is source-available under the Business Source License 1.1.
