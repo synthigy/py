@@ -68,9 +68,9 @@ class TestRender(unittest.TestCase):
         self.assertIn('"created_by": '
                       "NotRequired[MovieDetailRowMovieRatingsCreatedBy],",
                       self.code)
-        # _count / _agg → honest maps
-        self.assertIn('"_count": NotRequired[dict[str, int]],', self.code)
-        self.assertIn('"_agg": NotRequired[dict[str, Any]],', self.code)
+        # operations → typed scalars (counts never null)
+        self.assertIn('"votes": int,', self.code)
+        self.assertIn('"rating": float | None,', self.code)
         # sql @returns float? → float | None
         self.assertIn('"avg_rating": float | None,', self.code)
 

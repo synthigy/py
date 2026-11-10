@@ -66,7 +66,7 @@ from .events import (
 )
 from .login import REJECTING_LOGIN_STORE, AsyncLoginAPI
 from .selection import normalize_selection
-from .util import generate_request_id, now_iso, xsql_document
+from .util import DEFAULT_TIMEOUT, generate_request_id, now_iso, xsql_document
 
 PLATFORM_AUDIENCE = "https://synthigy.com"
 """The platform API this SDK is a client of.
@@ -116,13 +116,13 @@ class _AsyncPool:
             timeout=self._timeout)
         return _AsyncConn(reader, writer, host)
 
-    async def request(self, method, url, body=None, headers=None):
+    async def request(self, method, url, body=None, headers=None, timeout=DEFAULT_TIMEOUT):
         """-> (status, headers-dict, body-bytes). Raises SynthigyError on
         transport failure (network error, not exhausted-retries)."""
         async with self._gate:
-            return await self._request(method, url, body, headers)
+            return await self._request(method, url, body, headers, timeout)
 
-    async def _request(self, method, url, body=None, headers=None):
+    async def _request(self, method, url, body=None, headers=None, timeout=DEFAULT_TIMEOUT):
         u = urllib.parse.urlsplit(url)
         scheme = u.scheme or "http"
         port = u.port or (443 if scheme == "https" else 80)
@@ -140,7 +140,7 @@ class _AsyncPool:
                     conn = await self._connect(scheme, u.hostname, port)
                 status, resp_headers, data, will_close = await asyncio.wait_for(
                     self._exchange(conn, method, path, body, headers or {}),
-                    timeout=self._timeout)
+                    timeout=self._timeout if timeout is DEFAULT_TIMEOUT else timeout)
             except (OSError, asyncio.TimeoutError, ConnectionError) as e:
                 if conn is not None:
                     conn.writer.close()
@@ -1496,9 +1496,9 @@ class AsyncClient:
         return await asyncio.to_thread(self._token_manager.get_token,
                                        audience or self._default_audience)
 
-    async def _authed(self, method, path, body=None, headers=None):
+    async def _authed(self, method, path, body=None, headers=None, timeout=DEFAULT_TIMEOUT):
         """Authorized request to any endpoint: bearer + request id, 401
-        clear+retry-once, on_op timing. -> (status, headers, body-bytes)."""
+        clear+retry-once, on_op timing; `timeout=None` lifts the client's. -> (status, headers, body-bytes)."""
         url = self._endpoint + path
         h = dict(headers or {})
         h.setdefault("X-Request-Id", generate_request_id())
@@ -1507,12 +1507,12 @@ class AsyncClient:
             h["Authorization"] = f"Bearer {token}"
         started = time.monotonic()
         status, resp_headers, data = await self._pool.request(
-            method, url, body=body, headers=h)
+            method, url, body=body, headers=h, timeout=timeout)
         if status == 401 and self._token_manager:
             self._token_manager.clear()
             h["Authorization"] = f"Bearer {await self._token()}"
             status, resp_headers, data = await self._pool.request(
-                method, url, body=body, headers=h)
+                method, url, body=body, headers=h, timeout=timeout)
         if self._on_op:
             try:
                 self._on_op({"path": path, "status": status,

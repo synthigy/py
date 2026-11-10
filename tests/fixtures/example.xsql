@@ -6,12 +6,9 @@ movie (release_year > ?since:int=1980, limit ?limit:int=20, offset ?offset:int=0
   xid
   title (ilike ?q:string="%")
   release_year
-  _count
-    ratings:movie_ratings
-    actors:actors
-  _agg
-    ratings:movie_ratings
-      value: avg
+  votes: count(movie_ratings)
+  cast_size: count(actors)
+  rating: avg(movie_ratings.value)
   ->genres
     xid
     name

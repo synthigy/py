@@ -215,7 +215,7 @@ class TestFilesLive(unittest.TestCase):
         user.files.folder(top, cache=120)
         shown = admin.files.folder(top, public=True)
         self.assertEqual((shown["public"], shown["cache"], shown["settings"]),
-                         (True, 120, {"public": True, "cache": 120}))
+                         (True, 120, {"public": True, "cache": 120, "can_link": None}))
         self.assertTrue(user.files.info(note)["public"])
         for url in (user.files.url(note), user.files.url(note_path)):
             with urllib.request.urlopen(url) as r:
@@ -239,6 +239,52 @@ class TestFilesLive(unittest.TestCase):
         status, headers, body = user.files.serve(note_path, {"Range": "bytes=0-1"})
         self.assertEqual((status, body), (206, b"he"))
         self.assertEqual(user.files.serve(f"{top}gone-{run}.txt")[0], 404)
+
+        # 5b. download links
+        shut = self.put(user, f"{top}{self.name('link.txt')}", "linked")
+        admin.files.folder(top, public=False)
+        self.assertError("LINKS_DISABLED", user.files.link, shut, category="iam")
+        self.assertError("ATTRIBUTE_FORBIDDEN", user.files.folder, top, can_link=True, category="iam")
+        self.assertTrue(admin.files.folder(top, can_link=True)["can_link"])
+        self.assertError("FORBIDDEN", reader.files.link, shut, category="iam")
+        self.assertError("INVALID_EXPIRES", user.files.link, shut, expires=0, category="validation")
+
+        link = user.files.link(shut, expires=600)
+        self.assertEqual((link["file"], link["created_by"], link["downloads"]), (shut["xid"], user_xid, 0))
+        with urllib.request.urlopen(link["url"]) as r:
+            self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
+            self.assertEqual(r.read(), b"linked")
+
+        once = user.files.link(shut, max_downloads=1, inline=True)
+        with urllib.request.urlopen(urllib.request.Request(once["url"], headers={"Range": "bytes=1-2"})) as r:
+            self.assertEqual(r.status, 200, "a limited link ignores Range")
+            self.assertTrue(r.headers["Content-Disposition"].startswith("inline"))
+            self.assertEqual(r.read(), b"linked")
+        self.assertEqual(self.status(once["url"]), 404, "used up")
+
+        cid, secret = _creds("USER")
+        with Client(ENDPOINT, client_id=cid, client_secret=secret, timeout=30, key_format="camel") as camel:
+            seen = next(x for x in camel.files.links(shut) if x["xid"] == link["xid"])
+            self.assertEqual((seen["createdBy"], seen["maxDownloads"], "created_by" in seen), (user_xid, None, False))
+            self.assertEqual(camel.files.info(shut)["contentType"], user.files.info(shut)["content_type"])
+        mine = user.files.links(shut)
+        self.assertTrue(all("url" not in x for x in mine), "the url is shown once")
+        self.assertEqual(next(x for x in mine if x["xid"] == link["xid"])["downloads"], 1)
+        admins = admin.files.link(shut)
+        self.assertNotIn(admins["xid"], {x["xid"] for x in user.files.links(shut)}, "File User sees its own")
+        self.assertIn(link["xid"], {x["xid"] for x in admin.files.links(shut)}, "File Admin sees all")
+        self.assertError("LINK_NOT_FOUND", user.files.unlink, admins["xid"], category="not_found")
+
+        admin.files.folder(top, can_link=False)
+        self.assertEqual(self.status(link["url"]), 404, "switched off: existing links stop")
+        admin.files.folder(top, can_link=True)
+        self.assertEqual(self.status(link["url"]), 200)
+        user.files.unlink(link)
+        self.assertEqual(self.status(link["url"]), 404, "unlinked: gone at once")
+        user.files.delete(shut)
+        self.files.remove(shut["xid"])
+        self.assertEqual(self.status(admins["url"]), 404, "file deleted: its links die")
+        admin.files.folder(top, public=True, can_link=None)
 
         # 6. admin moves the subfolder to ROOT and deletes it
         self.assertEqual(admin.files.move(f"{top}sub2/", f"/sub2-py-{run}/")["path"], f"/sub2-py-{run}/")

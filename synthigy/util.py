@@ -52,3 +52,7 @@ def xsql_document(source, op):
     if source.lstrip().startswith("@"):
         return source
     return f"@{op} _q\n{source}"
+
+
+DEFAULT_TIMEOUT = object()
+"""Per-call timeout meaning: use the client's own; None lifts it."""

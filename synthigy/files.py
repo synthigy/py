@@ -7,6 +7,7 @@ import re
 import urllib.parse
 
 from .errors import SynthigyError, error_from_server
+from .util import DEFAULT_TIMEOUT
 
 _ANY = object()
 
@@ -30,6 +31,10 @@ def _is_folder(x):
     if isinstance(x, dict):
         x = x.get("path")
     return _is_path(x) and x.endswith("/")
+
+
+def _file_ref(x):
+    return (x.get("xid") or x.get("path")) if isinstance(x, dict) else x
 
 
 def _folder_ref(x):
@@ -74,12 +79,15 @@ class AsyncFilesAPI:
         self._client = client
 
     def _query(self, query):
-        qs = urllib.parse.urlencode({k: v for k, v in (query or {}).items() if v is not None})
+        kf = self._client._default_key_format
+        query = {**(query or {}), **({"key_format": kf} if kf and kf != "snake" else {})}
+        qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
         return f"?{qs}" if qs else ""
 
-    async def _send(self, method, path, *, query=None, body=None, headers=None):
+    async def _send(self, method, path, *, query=None, body=None, headers=None, file_bytes=False):
         status, resp_headers, data = await self._client._authed(
-            method, "/files" + path + self._query(query), body=body, headers=headers)
+            method, "/files" + path + self._query(query), body=body, headers=headers,
+            timeout=None if file_bytes else DEFAULT_TIMEOUT)
         if 200 <= status < 300 or status == 304:
             return status, resp_headers, data
         request_id = resp_headers.get("x-request-id")
@@ -135,7 +143,7 @@ class AsyncFilesAPI:
         headers = {"Content-Type": ctype}
         if expected:
             headers["If-Match"] = f'"{expected}"'
-        _s, _h, out = await self._send(method, path, query=query, body=raw, headers=headers)
+        _s, _h, out = await self._send(method, path, query=query, body=raw, headers=headers, file_bytes=True)
         return json.loads(out)
 
     async def download(self, file, *, byte_range=None, if_none_match=None, version=None):
@@ -152,8 +160,16 @@ class AsyncFilesAPI:
         else:
             vid = version.get("id") if isinstance(version, dict) else version
             path, query = f"/{_q(await self._xid_at(file))}/versions/{_q(vid)}", None
-        status, _h, data = await self._send("GET", path, query=query, headers=headers)
+        status, _h, data = await self._send("GET", path, query=query, headers=headers, file_bytes=True)
         return None if status == 304 else data
+
+    async def zip(self, *, files=(), folders=()):
+        """One zip (bytes) of `files` and of everything inside `folders`, read as you; what you
+        cannot read is listed in its _skipped.txt."""
+        payload = {"files": [_file_ref(f) for f in files], "folders": [_folder_ref(d) for d in folders]}
+        _s, _h, data = await self._send("POST", "/zip", body=json.dumps(payload).encode(),
+                                        headers={"Content-Type": "application/json"}, file_bytes=True)
+        return data
 
     async def info(self, file):
         """The file, or None when it is not there or you cannot see it."""
@@ -223,10 +239,11 @@ class AsyncFilesAPI:
         payload = {"folder": to} if to.endswith("/") else {"folder": to[:cut + 1], "name": to[cut + 1:]}
         return await self._json("PATCH", path, payload, query)
 
-    async def folder(self, path, *, public=_ANY, cache=_ANY):
-        """The folder at `path`, made with every missing folder above it; `public` and `cache`
-        set its own settings (None: inherit from above)."""
-        settings = {k: v for k, v in (("public", public), ("cache", cache)) if v is not _ANY}
+    async def folder(self, path, *, public=_ANY, cache=_ANY, can_link=_ANY):
+        """The folder at `path`, made with every missing folder above it; `public`, `cache` and
+        `can_link` set its own settings (None: inherit from above)."""
+        settings = {k: v for k, v in (("public", public), ("cache", cache), ("can_link", can_link))
+                    if v is not _ANY}
         return await self._json("PUT", "/folders", settings, {"path": path})
 
     async def share(self, folder, access, *, users=(), groups=()):
@@ -254,6 +271,21 @@ class AsyncFilesAPI:
         vid = version.get("id") if isinstance(version, dict) else version
         return await self._json("POST", f"/{_q(await self._xid_at(file))}/versions/{_q(vid)}/restore")
 
+    async def link(self, file, *, expires=None, max_downloads=None, inline=None):
+        """A link that downloads the file without signing in, where the folder's can_link allows it;
+        `expires` seconds (default 3600, at most 7 days). Its `url` is shown only now."""
+        opts = {"expires": expires, "max_downloads": max_downloads, "inline": inline}
+        return await self._json("POST", f"/{_q(await self._xid_at(file))}/links",
+                                {k: v for k, v in opts.items() if v is not None})
+
+    async def links(self, file):
+        """The file's live links you can see: your own, or all of them for File Admin."""
+        return (await self._json("GET", f"/{_q(await self._xid_at(file))}/links"))["links"]
+
+    async def unlink(self, link):
+        """End a link (the link or its xid) at once, on every engine."""
+        await self._send("DELETE", f"/links/{_q(_xid(link))}")
+
     async def serve(self, file, headers=None, *, method="GET", inline=False):
         """Answer a browser's request with the file: -> (status, headers, body). Range, If-None-Match
         and If-Range from `headers` go through; a refusal is the engine's own answer."""
@@ -262,6 +294,6 @@ class AsyncFilesAPI:
         path, query = _file_at(file)
         query = {**(query or {}), **({"disposition": "inline"} if inline else {})}
         status, resp_headers, data = await self._client._authed(
-            "HEAD" if method == "HEAD" else "GET", "/files" + path + self._query(query), headers=h)
+            "HEAD" if method == "HEAD" else "GET", "/files" + path + self._query(query), headers=h, timeout=None)
         out = {k: resp_headers[k] for k in SERVED_HEADERS if resp_headers.get(k)}
         return status, out, b"" if method == "HEAD" else data

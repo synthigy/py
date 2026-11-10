@@ -3,6 +3,7 @@
 import io
 import json
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -38,9 +39,29 @@ class _FilesStub(BaseHTTPRequestHandler):
                              "uploaded_by": {"xid": "u1", "name": "jane"}, "folder": None})
         elif path in ("/files", "/files/f1") and self.command == "PATCH":
             self._json(200, {"xid": "f1", "name": "n.png", "folder": {"xid": "d1", "path": "/b/"}})
+        elif path.startswith("/files/slow"):
+            time.sleep(0.6)
+            if path.endswith("/info"):
+                self._json(200, {"xid": "slow"})
+            else:
+                self._send(200, b"late bytes")
+        elif path == "/files/zip" and self.command == "POST":
+            if b'"big/"' in body:
+                self._json(413, {"error": {"code": "ZIP_TOO_LARGE", "message": "too big", "details": {"files": 20001}}})
+            else:
+                self._send(200, b"PK\x03\x04", {"Content-Type": "application/zip"})
+        elif path == "/files/off/links":
+            self._json(403, {"error": {"code": "LINKS_DISABLED", "message": "off"}})
+        elif path.endswith("/links") and b'"expires": 0' in body:
+            self._json(400, {"error": {"code": "INVALID_EXPIRES", "message": "bad"}})
+        elif path.endswith("/links") and self.command == "POST":
+            self._json(201, {"xid": "l1", "file": "f9", "url": "http://x/files/link/t", "downloads": 0,
+                             "max_downloads": 2, "inline": True})
+        elif path.endswith("/links"):
+            self._json(200, {"file": "f9", "links": [{"xid": "l1", "file": "f9", "downloads": 0}]})
         elif path == "/files/info" and "gone" in query:
             self._json(404, {"error": {"code": "FILE_NOT_FOUND", "message": "No such file"}})
-        elif path == "/files/info":
+        elif path in ("/files/info", "/files/f9/info"):
             self._json(200, {"xid": "f9", "name": "r.txt"})
         elif path == "/files" and self.command == "GET" and "gone" in query:
             self._json(404, {"error": {"code": "FILE_NOT_FOUND", "message": "No such file"}})
@@ -153,6 +174,61 @@ class FilesTest(unittest.TestCase):
         self.c.files.download("/a/r.txt", version={"id": 7})
         self.assertEqual([c["path"] for c in self.httpd.calls[-2:]],
                          ["/files/info?path=%2Fa%2Fr.txt", "/files/f9/versions/7"])
+
+    def test_timeout_spares_file_bytes(self):
+        c = Client(f"http://127.0.0.1:{self.httpd.server_address[1]}", token="tok", timeout=0.2)
+        self.assertEqual(c.files.download("slow"), b"late bytes")
+        with self.assertRaises(SynthigyError) as e:
+            c.files.info("slow")
+        self.assertEqual(e.exception.code, "NETWORK_ERROR")
+
+    def test_zip(self):
+        out = self.c.files.zip(files=["f1", "/a/r.txt", {"xid": "f9"}], folders=["/site/img/", {"xid": "d1", "path": "/b/"}])
+        self.assertEqual(out, b"PK\x03\x04")
+        self.assertEqual((self.last["method"], self.last["path"]), ("POST", "/files/zip"))
+        self.assertEqual(self.last["headers"]["Content-Type"], "application/json")
+        self.assertEqual(json.loads(self.last["body"]),
+                         {"files": ["f1", "/a/r.txt", "f9"], "folders": ["/site/img/", "/b/"]})
+        with self.assertRaises(SynthigyError) as e:
+            self.c.files.zip(folders=["big/"])
+        self.assertEqual(e.exception.code, "ZIP_TOO_LARGE")
+
+    def test_link_links_unlink(self):
+        n = len(self.httpd.calls)
+        self.assertEqual(self.c.files.link("/a.txt", expires=600, max_downloads=2, inline=True)["url"],
+                         "http://x/files/link/t")
+        self.assertEqual(json.loads(self.last["body"]), {"expires": 600, "max_downloads": 2, "inline": True})
+        self.assertEqual(self.c.files.links("f9")[0]["xid"], "l1")
+        self.assertIsNone(self.c.files.unlink({"xid": "l1"}))
+        self.c.files.unlink("l1")
+        self.assertEqual([(c["method"], c["path"]) for c in self.httpd.calls[n:]], [
+            ("GET", "/files/info?path=%2Fa.txt"), ("POST", "/files/f9/links"), ("GET", "/files/f9/links"),
+            ("DELETE", "/files/links/l1"), ("DELETE", "/files/links/l1")])
+        self.c.files.link("f9")
+        self.assertEqual(json.loads(self.last["body"]), {})
+
+    def test_link_refusals_and_can_link(self):
+        e = self.code(lambda: self.c.files.link("off"))
+        self.assertEqual((e.code, e.category), ("LINKS_DISABLED", "iam"))
+        e = self.code(lambda: self.c.files.link("f9", expires=0))
+        self.assertEqual((e.code, e.category), ("INVALID_EXPIRES", "validation"))
+        self.c.files.folder("/s/", can_link=True, cache=60)
+        self.assertEqual(self.body(), {"cache": 60, "can_link": True})
+        self.c.files.folder("/s/", can_link=None)
+        self.assertEqual(self.body(), {"can_link": None})
+        self.assertEqual(SynthigyError("x", "LINK_NOT_FOUND").category, "not_found")
+
+    def test_key_format_reaches_files(self):
+        base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        for kf in ("camel", "snake"):
+            with Client(base, token="tok", key_format=kf) as c:
+                c.files.info("f9")
+        with Client(base, token="tok", key_format="camel") as c:
+            c.files.links("/a.txt")
+            self.assertNotIn("key_format", c.files.url("f1"))
+        self.assertEqual([x["path"] for x in self.httpd.calls[-4:]], [
+            "/files/f9/info?key_format=camel", "/files/f9/info",
+            "/files/info?path=%2Fa.txt&key_format=camel", "/files/f9/links?key_format=camel"])
 
     def test_list_search_move(self):
         self.assertEqual(self.c.files.list(limit=5, offset=10)["folders"], [])

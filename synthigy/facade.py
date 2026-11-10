@@ -49,7 +49,8 @@ class Client:
                        to the identity-only OIDC audience that /data rejects.
         acting_as    : default impersonation, overridable per call
         key_format   : "kebab" | "snake" | "camel"; None = server default (snake)
-        timeout      : per-request timeout in SECONDS
+        timeout      : per-request timeout in SECONDS; file bytes (files.put, download,
+                       zip, serve) are exempt, a large file takes as long as it takes
         keep_alive   : pin the SSE session open across watch churn
                        (starts the loop thread eagerly)
         login_store  : where in-flight logins live between login.start()
@@ -339,6 +340,9 @@ class FilesAPI:
     def download(self, *a, **kw):
         return self._call("download", *a, **kw)
 
+    def zip(self, *a, **kw):
+        return self._call("zip", *a, **kw)
+
     def info(self, *a, **kw):
         return self._call("info", *a, **kw)
 
@@ -374,6 +378,15 @@ class FilesAPI:
 
     def restore(self, *a, **kw):
         return self._call("restore", *a, **kw)
+
+    def link(self, *a, **kw):
+        return self._call("link", *a, **kw)
+
+    def links(self, *a, **kw):
+        return self._call("links", *a, **kw)
+
+    def unlink(self, *a, **kw):
+        return self._call("unlink", *a, **kw)
 
     def serve(self, *a, **kw):
         return self._call("serve", *a, **kw)

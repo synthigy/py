@@ -1,5 +1,5 @@
 {
-  "sourceHash": "910e896bca103bfb54a133eb4343b16801d89b206311de3eb76cd14bc641edad",
+  "sourceHash": "4d9ccd00584666a9aaa21cb0f76cdf751957956b1c891a61c6ddcc021562ac95",
   "operations": [
     {
       "name": "list",
@@ -31,7 +31,7 @@
           "optional": true
         }
       ],
-      "source": "movie (release_year > ?since:int=1980, limit ?limit:int=20, offset ?offset:int=0, order by release_year desc)\n  xid\n  title (ilike ?q:string=\"%\")\n  release_year\n  _count\n    ratings:movie_ratings\n    actors:actors\n  _agg\n    ratings:movie_ratings\n      value: avg\n  ->genres\n    xid\n    name",
+      "source": "movie (release_year > ?since:int=1980, limit ?limit:int=20, offset ?offset:int=0, order by release_year desc)\n  xid\n  title (ilike ?q:string=\"%\")\n  release_year\n  votes: count(movie_ratings)\n  cast_size: count(actors)\n  rating: avg(movie_ratings.value)\n  ->genres\n    xid\n    name",
       "description": "Movies newest-first with rating/actor counts, average rating and genres.\nFilter by title with ?q (ilike) and minimum release year with ?since.",
       "watch": true,
       "result": {
@@ -51,16 +51,21 @@
             "type": "int"
           },
           {
-            "key": "_count",
-            "kind": "map",
-            "value": "int",
-            "optional": true
+            "key": "votes",
+            "kind": "op",
+            "type": "int",
+            "nullable": false
           },
           {
-            "key": "_agg",
-            "kind": "map",
-            "value": "unknown",
-            "optional": true
+            "key": "cast_size",
+            "kind": "op",
+            "type": "int",
+            "nullable": false
+          },
+          {
+            "key": "rating",
+            "kind": "op",
+            "type": "float"
           },
           {
             "key": "genres",
@@ -94,7 +99,7 @@
         }
       ],
       "source": "movie (xid = ?xid:string)\n  xid\n  title\n  release_year\n  ->movie_ratings\n    xid\n    value\n    review\n    ->created_by\n      xid\n      name\n  ->genres\n    xid\n    name\n  ->actors\n    xid\n    name\n    birth_year",
-      "description": "One movie by xid \u2014 ratings with reviewer, plus genres and cast.",
+      "description": "One movie by xid — ratings with reviewer, plus genres and cast.",
       "watch": true,
       "result": {
         "kind": "object",

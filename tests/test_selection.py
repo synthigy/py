@@ -66,15 +66,12 @@ class TestNormalizeSelection(unittest.TestCase):
         # no join is ever injected — the wire carries what the caller wrote
         self.assertNotIn("_join", out["roles"][1]["args"])
 
-    def test_count_agg_subtrees_never_get_join(self):
-        out = normalize_selection({
-            "name": None,
-            "_count": {"roles": None},
-            "_agg": {"tasks": {"priority": ["avg"]}},
-        })
-        self.assertEqual(out["_count"], [{"selections": {"roles": None}}])
-        agg_tasks = out["_agg"][0]["selections"]["tasks"][0]
-        self.assertNotIn("args", agg_tasks)
+    def test_operation_entries_pass_through(self):
+        ops = [{"alias": "votes", "op": "count"},
+               {"alias": "rating", "op": {"avg": "value"},
+                "args": {"_where": {"verified": {"_eq": True}}}}]
+        out = normalize_selection({"name": None, "ratings": ops})
+        self.assertEqual(out, {"name": None, "ratings": ops})
 
     def test_nested_string_list(self):
         out = normalize_selection({"roles": ["name", "type"]})

@@ -133,8 +133,9 @@ count = synthigy.sql_template(
   `-genres` is **inner** and keeps only movies that have one; `!genres` keeps
   only movies with none (filters allowed, no fields under it).
 - **Empty relations are omitted**, never `[]` — use `row.get("genres", [])`.
-- Counting and aggregation compute in the database: `_count` / `_agg` in XSQL,
-  or `sql_template`.
+- Counting and aggregation compute in the database: an operation line in XSQL
+  (`votes: count(movie_ratings)`, `rating: avg(movie_ratings.value)`; the alias
+  is the result key), or `sql_template`.
 
 ## Writes
 
@@ -235,6 +236,7 @@ files.move("/site/img/logo.png", "/brand/")     # keeps the name; never overwrit
 files.move("/site/img/", "/assets/img/")        # a folder
 vs = files.versions(fi)                         # the last ten, newest first
 files.restore(fi, vs[1])
+z = files.zip(folders=["/site/img/"], files=["/notes/today.txt"])   # zip bytes; unreadable ones in _skipped.txt
 files.share("/site/", "read", users=[user_xid])
 files.delete("/site/img/logo.png")              # or an empty folder: "/site/img/"
 ```
@@ -255,17 +257,41 @@ src = files.url("/site/img/logo.png")           # or an xid; inline=True opens i
 status, headers, body = files.serve("/private/logo.png", request.headers)
 ```
 
-A folder's own `public` and `cache` win, else the nearest folder above that
-has one (`None` clears its own); the folder shows what applies as `public`
-and `cache`, what is set on it under `settings`. File User may set the cache
+A link hands one file to someone without an account, or to another service:
+
+```python
+files.folder("/reports/", can_link=True)        # File Admin's to set; off everywhere until set
+link = files.link("/reports/q3.pdf", expires=86400, max_downloads=3)
+link["url"]                                     # https://…/files/link/<token>, shown only now
+files.links("/reports/q3.pdf")                  # live links you can see (File Admin: all)
+files.unlink(link)                              # or its xid; ends at once, on every engine
+```
+
+Links work only where the folder's `can_link` is on (inherited like `public`;
+files in no folder never). File User and File Admin make links to files they
+can read, File Reader cannot; each download checks that whoever made the link
+can still read the file. `expires` is seconds, 3600 by default, at most 7
+days; with `max_downloads` each GET is one whole download (Range is ignored).
+An expired, used-up, revoked or wrong link is `LINK_NOT_FOUND`; the `url`
+cannot be read back later.
+
+A client made with `key_format="camel"` (or `"kebab"`) gets `/files` answers in
+that case too (`contentType`, `canLink`, `maxDownloads`); the examples here
+are snake_case.
+
+A folder's own `public`, `cache` and `can_link` win, else the nearest folder above that
+has one (`None` clears its own); the folder shows what applies as `public`,
+`cache` and `can_link`, what is set on it under `settings`. File User may set the cache
 but not public (`ATTRIBUTE_FORBIDDEN`).
 
-One put carries up to the server's `SYNTHIGY_SERVER_MAX_BODY` (25 MB by
-default). The engine's [files guide](https://github.com/synthigy/synthigy/blob/main/docs/FILES.md)
+One put has no size limit on the Enso and Jetty servers; on http-kit it
+carries up to `SYNTHIGY_HTTPKIT_MAX_BODY` (25 MB by default), refused with a 413.
+The engine's [files guide](https://github.com/synthigy/synthigy/blob/main/docs/FILES.md)
 covers storage, access and retention; error codes include `FILE_NOT_FOUND`,
-`FOLDER_NOT_FOUND`, `FILE_CHANGED`, `FILE_TOO_LARGE`, `VERSION_EXPIRED`,
-`INVALID_PATH`, `AUDIT_UNAVAILABLE` and `FILES_UNAVAILABLE` (no files module
-on the server).
+`FOLDER_NOT_FOUND`, `FILE_CHANGED`, `FILE_TOO_LARGE`, `ZIP_TOO_LARGE`, `VERSION_EXPIRED`,
+`INVALID_PATH`, `AUDIT_UNAVAILABLE`, `FILES_UNAVAILABLE` (no files module
+on the server), `LINKS_DISABLED` (iam: the folder does not allow links),
+`LINK_NOT_FOUND` and `INVALID_EXPIRES` (not whole seconds from 1 to 604800).
 
 ## Errors
 

@@ -225,9 +225,6 @@ def _emit_rows(prefix, fields, chunks):
             child = _emit_rows(prefix + pascal(k), f.get("fields") or [], chunks)
             inner = f"list[{child}]" if f.get("cardinality") == "many" else child
             entries.append((k, f"NotRequired[{inner}]"))
-        elif kind == "map":   # _count / _agg — honest maps, alias-keyed wire
-            v = PY_SCALAR.get(f.get("value"), "Any")
-            entries.append((k, f"NotRequired[dict[str, {v}]]"))
         else:
             entries.append((k, _scalar_py(f)))
     chunks.append(_typeddict(prefix, entries))
@@ -501,7 +498,9 @@ def _emit_write_types(entity, schema, referenced, chunks):
             continue
         t = _attr_py_write(a)
         read_t = _attr_py_write({**a, "retired": None})
-        if a.get("nullable") is False:
+        if a.get("read-only"):
+            pass                                   # the system sets it; never an input
+        elif a.get("nullable") is False:
             in_entries.append((k, t))              # required on input
         else:
             in_entries.append((k, f"NotRequired[{t}]" if t == "None" else f"NotRequired[{t} | None]"))
@@ -509,6 +508,8 @@ def _emit_write_types(entity, schema, referenced, chunks):
     for k, r in rels.items():
         if r.get("to") not in (schema.get("entities") or {}):
             continue   # relation target filtered out of the schema → skip
+        if ((ent.get("attributes") or {}).get(k) or {}).get("read-only"):
+            continue   # a stamp: the system sets it
         # a write relation is a LINK ({xid}) or a nested write; string
         # annotation = forward reference (entity graphs are cyclic)
         link = (f"_Link | {entity_pascal(schema, r['to'])}Input"

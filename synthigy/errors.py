@@ -37,6 +37,7 @@ ERROR_CATEGORIES = {
     "INVALID_AUDIENCE": "auth",
     # iam
     "FORBIDDEN": "iam",
+    "LINKS_DISABLED": "iam",
     "FORBIDDEN_OP": "iam",
     "ENTITY_FORBIDDEN": "iam",
     "ENTITY_NOT_READABLE": "iam",
@@ -100,8 +101,10 @@ ERROR_CATEGORIES = {
     "METHOD_NOT_ALLOWED": "validation",
     "INVALID_SLICE": "validation",
     "FILE_TOO_LARGE": "validation",
+    "ZIP_TOO_LARGE": "validation",
     "UNSUPPORTED_MEDIA_TYPE": "validation",
     "RANGE_NOT_SATISFIABLE": "validation",
+    "INVALID_EXPIRES": "validation",
     # not_found
     "UNKNOWN_ENTITY": "not_found",
     "UNKNOWN_RELATION": "not_found",
@@ -109,10 +112,12 @@ ERROR_CATEGORIES = {
     "HISTORY_UNAVAILABLE": "not_found",
     "NOT_FOUND": "not_found",
     "FILE_NOT_FOUND": "not_found",
+    "LINK_NOT_FOUND": "not_found",
     "FOLDER_NOT_FOUND": "not_found",
     "VERSION_EXPIRED": "not_found",
     "FILES_UNAVAILABLE": "not_found",  # the files module is not running — retrying can't fix it
     "AUDIT_UNAVAILABLE": "not_found",  # file writes need audit history and none is running
+    "FILES_MIGRATING": "internal",  # uploads paused while files move to a new store — retry shortly
     # conflict
     "FK_VIOLATION": "conflict",
     "MODEL_BUSY": "conflict",
