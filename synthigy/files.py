@@ -84,7 +84,10 @@ class AsyncFilesAPI:
         qs = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
         return f"?{qs}" if qs else ""
 
-    async def _send(self, method, path, *, query=None, body=None, headers=None, file_bytes=False):
+    async def _send(self, method, path, *, query=None, body=None, headers=None, file_bytes=False,
+                    acting_as=None):
+        if acting_as:
+            headers = {**(headers or {}), "X-Acting-As": acting_as}
         status, resp_headers, data = await self._client._authed(
             method, "/files" + path + self._query(query), body=body, headers=headers,
             timeout=None if file_bytes else DEFAULT_TIMEOUT)
@@ -105,24 +108,25 @@ class AsyncFilesAPI:
                             data.decode("utf-8", "replace") if data else None,
                             request_id=request_id, status=status)
 
-    async def _json(self, method, path, payload=None, query=None):
+    async def _json(self, method, path, payload=None, query=None, acting_as=None):
         headers, body = {}, None
         if payload is not None:
             headers["Content-Type"] = "application/json"
             body = json.dumps(payload).encode()
-        _s, _h, data = await self._send(method, path, query=query, body=body, headers=headers)
+        _s, _h, data = await self._send(method, path, query=query, body=body, headers=headers,
+                                        acting_as=acting_as)
         return json.loads(data) if data else None
 
-    async def _xid_at(self, ref):
+    async def _xid_at(self, ref, acting_as=None):
         """-> the xid of a file named by path or xid; versions take only an xid."""
         if not _is_path(ref):
             return _xid(ref)
-        f = await self.info(ref)
+        f = await self.info(ref, acting_as=acting_as)
         if not f:
             raise SynthigyError(f"No such file: {ref}", "FILE_NOT_FOUND", status=404)
         return f["xid"]
 
-    async def put(self, target, data, *, content_type=None, if_match=None):
+    async def put(self, target, data, *, content_type=None, if_match=None, acting_as=None):
         """Store bytes, a str or a binary file. A path (/a/b/name, the folder must exist) creates
         the file or replaces it; an xid or the file replaces it; {"name": ...} makes a new file in no folder."""
         raw, ctype = _body(data, content_type)
@@ -143,10 +147,11 @@ class AsyncFilesAPI:
         headers = {"Content-Type": ctype}
         if expected:
             headers["If-Match"] = f'"{expected}"'
-        _s, _h, out = await self._send(method, path, query=query, body=raw, headers=headers, file_bytes=True)
+        _s, _h, out = await self._send(method, path, query=query, body=raw, headers=headers, file_bytes=True,
+                                       acting_as=acting_as)
         return json.loads(out)
 
-    async def download(self, file, *, byte_range=None, if_none_match=None, version=None):
+    async def download(self, file, *, byte_range=None, if_none_match=None, version=None, acting_as=None):
         """The bytes of a file, or None while `if_none_match` still matches; `byte_range=(start, end)`
         is inclusive, `version` reads a kept one."""
         headers = {}
@@ -159,57 +164,60 @@ class AsyncFilesAPI:
             path, query = _file_at(file)
         else:
             vid = version.get("id") if isinstance(version, dict) else version
-            path, query = f"/{_q(await self._xid_at(file))}/versions/{_q(vid)}", None
-        status, _h, data = await self._send("GET", path, query=query, headers=headers, file_bytes=True)
+            path, query = f"/{_q(await self._xid_at(file, acting_as))}/versions/{_q(vid)}", None
+        status, _h, data = await self._send("GET", path, query=query, headers=headers, file_bytes=True,
+                                            acting_as=acting_as)
         return None if status == 304 else data
 
-    async def zip(self, *, files=(), folders=()):
+    async def zip(self, *, files=(), folders=(), acting_as=None):
         """One zip (bytes) of `files` and of everything inside `folders`, read as you; what you
         cannot read is listed in its _skipped.txt."""
         payload = {"files": [_file_ref(f) for f in files], "folders": [_folder_ref(d) for d in folders]}
         _s, _h, data = await self._send("POST", "/zip", body=json.dumps(payload).encode(),
-                                        headers={"Content-Type": "application/json"}, file_bytes=True)
+                                        headers={"Content-Type": "application/json"}, file_bytes=True,
+                                        acting_as=acting_as)
         return data
 
-    async def info(self, file):
+    async def info(self, file, *, acting_as=None):
         """The file, or None when it is not there or you cannot see it."""
         try:
             path, query = _file_at(file, "/info")
-            return await self._json("GET", path, query=query)
+            return await self._json("GET", path, query=query, acting_as=acting_as)
         except SynthigyError as e:
             if e.code in ("FILE_NOT_FOUND", "FOLDER_NOT_FOUND"):
                 return None
             raise
 
-    async def list(self, folder=_ANY, *, q=None, limit=None, offset=None):
+    async def list(self, folder=_ANY, *, q=None, limit=None, offset=None, acting_as=None):
         """A folder's {"files", "folders"}; None: the files in no folder; omitted: every file you
         can see, newest first. `q` keeps names holding its words in order."""
         page = {"q": q or None, "limit": limit, "offset": offset}
         if folder is _ANY:
-            return {"files": (await self._json("GET", "", query=page))["files"], "folders": []}
+            return {"files": (await self._json("GET", "", query=page, acting_as=acting_as))["files"], "folders": []}
         if folder is None:
-            return {"files": (await self._json("GET", "", query={**page, "folderless": "true"}))["files"],
+            return {"files": (await self._json("GET", "", query={**page, "folderless": "true"},
+                                               acting_as=acting_as))["files"],
                     "folders": []}
         ref = _folder_ref(folder)
-        files = (await self._json("GET", "", query={**page, "folder": ref}))["files"]
-        folders = (await self._json("GET", "/folders", query={"parent": ref}))["folders"]
+        files = (await self._json("GET", "", query={**page, "folder": ref}, acting_as=acting_as))["files"]
+        folders = (await self._json("GET", "/folders", query={"parent": ref}, acting_as=acting_as))["folders"]
         words = (q or "").split()
         if words:
             holds = re.compile(".*".join(re.escape(w) for w in words), re.IGNORECASE)
             folders = [f for f in folders if holds.search(f.get("name") or "")]
         return {"files": files, "folders": folders}
 
-    async def search(self, q, *, folder=None, limit=None, offset=None):
+    async def search(self, q, *, folder=None, limit=None, offset=None, acting_as=None):
         """Folders and files whose paths hold the words of `q` in order, shortest path first:
         {"results", "truncated"}; `folder` keeps it below that folder."""
         return await self._json("GET", "/search", query={
             "q": q, "folder": _folder_ref(folder) if folder is not None else None,
-            "limit": limit, "offset": offset})
+            "limit": limit, "offset": offset}, acting_as=acting_as)
 
-    async def delete(self, ref):
+    async def delete(self, ref, *, acting_as=None):
         """Delete a file, or an empty folder (a path ending in / or the folder itself)."""
         path, query = _folder_at(ref) if _is_folder(ref) else _file_at(ref)
-        await self._send("DELETE", path, query=query)
+        await self._send("DELETE", path, query=query, acting_as=acting_as)
 
     def url(self, file, *, inline=False):
         """Where a file loads from, without a request: /files/<xid>, or /files/path/... for a path;
@@ -222,7 +230,7 @@ class AsyncFilesAPI:
             u = f"{self._client._endpoint}/files/{_q(_xid(file))}"
         return u + "?disposition=inline" if inline else u
 
-    async def move(self, src, to):
+    async def move(self, src, to, *, acting_as=None):
         """Rename or move. A file goes to `to` (/a/new.png), or into a folder when `to` ends in /
         (the name stays); a folder's `to` is its new path."""
         if not _is_path(to):
@@ -233,64 +241,69 @@ class AsyncFilesAPI:
                 raise SynthigyError("a folder moves to a path like /archive/2026/", "INVALID_PATH")
             path, query = _folder_at(src)
             parent = "/" + "/".join(parts[:-1]) + "/" if len(parts) > 1 else "/"
-            return await self._json("PATCH", path, {"name": parts[-1], "parent": parent}, query)
+            return await self._json("PATCH", path, {"name": parts[-1], "parent": parent}, query, acting_as)
         cut = to.rfind("/")
         path, query = _file_at(src)
         payload = {"folder": to} if to.endswith("/") else {"folder": to[:cut + 1], "name": to[cut + 1:]}
-        return await self._json("PATCH", path, payload, query)
+        return await self._json("PATCH", path, payload, query, acting_as)
 
-    async def folder(self, path, *, public=_ANY, cache=_ANY, can_link=_ANY):
+    async def folder(self, path, *, public=_ANY, cache=_ANY, can_link=_ANY, acting_as=None):
         """The folder at `path`, made with every missing folder above it; `public`, `cache` and
         `can_link` set its own settings (None: inherit from above)."""
         settings = {k: v for k, v in (("public", public), ("cache", cache), ("can_link", can_link))
                     if v is not _ANY}
-        return await self._json("PUT", "/folders", settings, {"path": path})
+        return await self._json("PUT", "/folders", settings, {"path": path}, acting_as)
 
-    async def share(self, folder, access, *, users=(), groups=()):
+    async def share(self, folder, access, *, users=(), groups=(), acting_as=None):
         """Give users and groups (xids or records) `access` (read, write or delete) on a folder;
         writers of the folder may."""
         path, query = _folder_at(folder, "/share")
-        await self._json("POST", path, {"access": access, **_grantees(users, groups)}, query)
+        await self._json("POST", path, {"access": access, **_grantees(users, groups)}, query, acting_as)
 
-    async def unshare(self, folder, access, *, users=(), groups=()):
+    async def unshare(self, folder, access, *, users=(), groups=(), acting_as=None):
         """Take `access` on a folder away from users and groups."""
         path, query = _folder_at(folder, "/unshare")
-        await self._json("POST", path, {"access": access, **_grantees(users, groups)}, query)
+        await self._json("POST", path, {"access": access, **_grantees(users, groups)}, query, acting_as)
 
-    async def access(self, folder):
+    async def access(self, folder, *, acting_as=None):
         """Who holds read, write and delete on a folder."""
         path, query = _folder_at(folder, "/access")
-        return await self._json("GET", path, query=query)
+        return await self._json("GET", path, query=query, acting_as=acting_as)
 
-    async def versions(self, file):
+    async def versions(self, file, *, acting_as=None):
         """The kept versions (the last ten), newest first."""
-        return (await self._json("GET", f"/{_q(await self._xid_at(file))}/versions"))["versions"]
+        return (await self._json("GET", f"/{_q(await self._xid_at(file, acting_as))}/versions",
+                                 acting_as=acting_as))["versions"]
 
-    async def restore(self, file, version):
+    async def restore(self, file, version, *, acting_as=None):
         """Make a kept version current again; no bytes are copied."""
         vid = version.get("id") if isinstance(version, dict) else version
-        return await self._json("POST", f"/{_q(await self._xid_at(file))}/versions/{_q(vid)}/restore")
+        return await self._json("POST", f"/{_q(await self._xid_at(file, acting_as))}/versions/{_q(vid)}/restore",
+                                acting_as=acting_as)
 
-    async def link(self, file, *, expires=None, max_downloads=None, inline=None):
+    async def link(self, file, *, expires=None, max_downloads=None, inline=None, acting_as=None):
         """A link that downloads the file without signing in, where the folder's can_link allows it;
         `expires` seconds (default 3600, at most 7 days). Its `url` is shown only now."""
         opts = {"expires": expires, "max_downloads": max_downloads, "inline": inline}
-        return await self._json("POST", f"/{_q(await self._xid_at(file))}/links",
-                                {k: v for k, v in opts.items() if v is not None})
+        return await self._json("POST", f"/{_q(await self._xid_at(file, acting_as))}/links",
+                                {k: v for k, v in opts.items() if v is not None}, acting_as=acting_as)
 
-    async def links(self, file):
+    async def links(self, file, *, acting_as=None):
         """The file's live links you can see: your own, or all of them for File Admin."""
-        return (await self._json("GET", f"/{_q(await self._xid_at(file))}/links"))["links"]
+        return (await self._json("GET", f"/{_q(await self._xid_at(file, acting_as))}/links",
+                                 acting_as=acting_as))["links"]
 
-    async def unlink(self, link):
+    async def unlink(self, link, *, acting_as=None):
         """End a link (the link or its xid) at once, on every engine."""
-        await self._send("DELETE", f"/links/{_q(_xid(link))}")
+        await self._send("DELETE", f"/links/{_q(_xid(link))}", acting_as=acting_as)
 
-    async def serve(self, file, headers=None, *, method="GET", inline=False):
+    async def serve(self, file, headers=None, *, method="GET", inline=False, acting_as=None):
         """Answer a browser's request with the file: -> (status, headers, body). Range, If-None-Match
         and If-Range from `headers` go through; a refusal is the engine's own answer."""
         incoming = {k.lower(): v for k, v in (headers or {}).items()}
         h = {k: incoming[k.lower()] for k in ("Range", "If-None-Match", "If-Range") if incoming.get(k.lower())}
+        if acting_as:
+            h["X-Acting-As"] = acting_as
         path, query = _file_at(file)
         query = {**(query or {}), **({"disposition": "inline"} if inline else {})}
         status, resp_headers, data = await self._client._authed(

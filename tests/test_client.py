@@ -127,12 +127,14 @@ class TestEnvelope(ClientTestCase):
         self.assertNotIn("key_format", body)
 
     def test_acting_as_only_when_set(self):
-        self.srv.route("/data", (200, ok_results([])))
-        c = self.static_client(acting_as="u-default")
+        self.srv.route("/data", (200, ok_results([])), (200, ok_results([])))
+        c = self.static_client()
         c.search("User", None, None)
-        self.assertEqual(self.last_data_body()["acting_as"], "u-default")
-        c.search("User", None, None, acting_as="u-override")
-        self.assertEqual(self.last_data_body()["acting_as"], "u-override")
+        self.assertNotIn("acting_as", self.last_data_body(), "the client runs as itself")
+        c.search("User", None, None, acting_as="u-call")
+        self.assertEqual(self.last_data_body()["acting_as"], "u-call")
+        with self.assertRaises(TypeError):
+            self.static_client(acting_as="u-default")
 
     def test_whoami(self):
         me = {"xid": "x-bgates", "name": "bgates", "active": True, "superuser": False,
@@ -157,7 +159,7 @@ class TestEnvelope(ClientTestCase):
         out = c.get("User", {"xid": "u-1"}, {"name": None})
         self.assertIsNone(out)
         op = self.last_data_body()["operations"][0]
-        self.assertEqual(op["args"], {"xid": "u-1"})  # flat, no _eq/_where
+        self.assertEqual(op["args"], {"xid": "u-1"})  # flat, no _eq
 
     def test_query_sends_xsql_document_op(self):
         # STRICT wire: XSQL travels only as {op: "xsql", xsql: <document>} —

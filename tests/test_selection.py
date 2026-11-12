@@ -56,9 +56,9 @@ class TestNormalizeSelection(unittest.TestCase):
 
     def test_multiple_rel_configs(self):
         out = normalize_selection({"roles": [
-            rel({"name": None}, args={"_where": {"active": {"_eq": True}}},
+            rel({"name": None}, args={"active": {"_eq": True}},
                 alias="on"),
-            rel({"name": None}, args={"_where": {"active": {"_eq": False}}},
+            rel({"name": None}, args={"active": {"_eq": False}},
                 alias="off"),
         ]})
         self.assertEqual(len(out["roles"]), 2)
@@ -69,7 +69,7 @@ class TestNormalizeSelection(unittest.TestCase):
     def test_operation_entries_pass_through(self):
         ops = [{"alias": "votes", "op": "count"},
                {"alias": "rating", "op": {"avg": "value"},
-                "args": {"_where": {"verified": {"_eq": True}}}}]
+                "args": {"verified": {"_eq": True}}}]
         out = normalize_selection({"name": None, "ratings": ops})
         self.assertEqual(out, {"name": None, "ratings": ops})
 

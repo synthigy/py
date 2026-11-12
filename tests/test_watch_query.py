@@ -17,6 +17,7 @@ class TestQueryWatch(WatchTestCase):
         rows2 = [{"xid": "m-1", "title": "A2"}, {"xid": "m-3", "title": "C"}]
         self.srv.route("/data",
                        (200, ok_results(rows1)),
+                       (200, ok_results(rows1)),  # the refetch once subscribed
                        (200, ok_results(rows2)))
         c = self.client()
         qw = c.watch_query("movie", {}, {"title": None})
@@ -127,6 +128,7 @@ class TestSqlTemplateWatch(WatchTestCase):
     def test_result_changed_on_touch(self):
         self.srv.route("/data",
                        (200, ok_results([{"n": 1}])),
+                       (200, ok_results([{"n": 1}])),  # the refetch once subscribed
                        (200, ok_results([{"n": 2}])))
         c = self.client()
         stw = c.watch_sql_template("SELECT COUNT(*) AS n FROM {movie}",

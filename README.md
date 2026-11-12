@@ -482,9 +482,10 @@ its own code-flow client plus a password user:
 
 `tests.test_files_live` runs `client.files` and `AsyncClient.files` against an
 engine with the files module, as three client-credentials clients whose service
-users hold File Admin, File User and File Reader. It skips unless
+users hold File Admin, File User and File Reader, plus a trusted File Admin client
+(BFF) that acts as the others. It skips unless
 `SYNTHIGY_FILES_TEST_ENDPOINT` and
-`SYNTHIGY_FILES_TEST_{ADMIN,USER,READER}_{ID,SECRET}` are set:
+`SYNTHIGY_FILES_TEST_{ADMIN,USER,READER,BFF}_{ID,SECRET}` are set:
 
 ```bash
 python3 -m unittest tests.test_files_live -v

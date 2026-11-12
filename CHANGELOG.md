@@ -3,6 +3,22 @@
 All notable changes to `synthigy` (PyPI). Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.4.0
+
+Needs engine v0.5.0 or later.
+
+### Breaking
+- **No client-wide `acting_as`.** `Client(acting_as=…)` / `AsyncClient(acting_as=…)`
+  is a TypeError: the client runs as itself; pass `acting_as=` per call.
+
+### Added
+- **Acting as a user on files.** `acting_as=` on every `files` call (sync and async); sent as `X-Acting-As`.
+  A trusted BFF works on files as the user, like `/data`.
+
+### Fixed
+- A write right after `watch_query` / `watch_query_xsql` / `watch_sql_template`
+  became ready could be missed: `ready()` returned once the stream opened, before
+  the engine held the subscription. It now waits for that and refetches once.
 ## 0.3.4
 
 Needs an engine with `POST /files/zip` (after v0.4.1).

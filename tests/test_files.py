@@ -132,6 +132,46 @@ class FilesTest(unittest.TestCase):
     def body(self):
         return json.loads(self.last["body"])
 
+    def _every_files_call(self, **o):
+        f = self.c.files
+        calls = [
+            lambda: f.put("/docs/a.txt", b"x", **o),
+            lambda: f.download("/r.txt", version=7, **o),
+            lambda: f.zip(files=["f1"], **o),
+            lambda: f.info("f9", **o),
+            lambda: f.list("/a/", **o),
+            lambda: f.list(**o),
+            lambda: f.search("q", **o),
+            lambda: f.delete("f1", **o),
+            lambda: f.move("f1", "/b/", **o),
+            lambda: f.folder("/b/new/", **o),
+            lambda: f.share("/a/", "read", users=["u2"], **o),
+            lambda: f.unshare("/a/", "read", users=["u2"], **o),
+            lambda: f.access("/a/", **o),
+            lambda: f.versions("/r.txt", **o),
+            lambda: f.restore("/r.txt", 7, **o),
+            lambda: f.link("/r.txt", **o),
+            lambda: f.links("/r.txt", **o),
+            lambda: f.unlink("l1", **o),
+            lambda: f.serve("f1", {}, **o),
+        ]
+        for call in calls:
+            try:
+                call()
+            except SynthigyError:
+                pass
+        return len(calls)
+
+    def test_acting_as_on_every_call(self):
+        n = self._every_files_call(acting_as="u7")
+        self.assertGreaterEqual(len(self.httpd.calls), n)
+        for c in self.httpd.calls:
+            self.assertEqual(c["headers"].get("X-Acting-As"), "u7", f'{c["method"]} {c["path"]}')
+        self.httpd.calls.clear()
+        self._every_files_call()
+        for c in self.httpd.calls:
+            self.assertNotIn("X-Acting-As", c["headers"], f'{c["method"]} {c["path"]}')
+
     def test_put(self):
         fi = self.c.files.put("/docs/a b.txt", b"hello")
         self.assertEqual((fi["xid"], fi["size"], fi["uploaded_by"]["name"]), ("f1", 5, "jane"))

@@ -8,6 +8,7 @@ client-credentials client whose service user holds the matching role:
     SYNTHIGY_FILES_TEST_ADMIN_ID   / SYNTHIGY_FILES_TEST_ADMIN_SECRET
     SYNTHIGY_FILES_TEST_USER_ID    / SYNTHIGY_FILES_TEST_USER_SECRET
     SYNTHIGY_FILES_TEST_READER_ID  / SYNTHIGY_FILES_TEST_READER_SECRET
+    SYNTHIGY_FILES_TEST_BFF_ID     / SYNTHIGY_FILES_TEST_BFF_SECRET  (trusted, File Admin)
 
 Run: python3 -m unittest tests.test_files_live -v
 """
@@ -23,7 +24,7 @@ import uuid
 from synthigy import AsyncClient, Client, SynthigyError
 
 ENDPOINT = os.environ.get("SYNTHIGY_FILES_TEST_ENDPOINT")
-ROLES = ("ADMIN", "USER", "READER")
+ROLES = ("ADMIN", "USER", "READER", "BFF")
 
 
 def _creds(role):
@@ -48,15 +49,15 @@ NOT_UTF8_JSON = bytes([0xff, 0xfe, 0x7b, 0x7d])
 
 
 @unittest.skipUnless(ENDPOINT and all(all(_creds(r)) for r in ROLES),
-                     "set SYNTHIGY_FILES_TEST_ENDPOINT and the ADMIN/USER/READER client pairs")
+                     "set SYNTHIGY_FILES_TEST_ENDPOINT and the ADMIN/USER/READER/BFF client pairs")
 class TestFilesLive(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.admin, cls.user, cls.reader = (_client(r) for r in ROLES)
+        cls.admin, cls.user, cls.reader, cls.bff = (_client(r) for r in ROLES)
 
     @classmethod
     def tearDownClass(cls):
-        for c in (cls.admin, cls.user, cls.reader):
+        for c in (cls.admin, cls.user, cls.reader, cls.bff):
             c.close()
 
     def setUp(self):
@@ -206,6 +207,18 @@ class TestFilesLive(unittest.TestCase):
         self.assertError("FORBIDDEN", reader.files.put, f, b"x", category="iam", status=403)
         self.assertError("FORBIDDEN", reader.files.folder, f"{top}r-{run}/", category="iam")
         self.assertError("FORBIDDEN", reader.files.restore, f, versions[0], category="iam")
+
+        # 4b. a trusted client acting as the user and the reader
+        bff = self.bff
+        self.assertEqual(bff.files.info(loose)["xid"], loose["xid"])
+        self.assertIsNone(bff.files.info(loose, acting_as=reader_xid))
+        self.assertEqual(bff.files.download(f, acting_as=reader_xid), BINARY)
+        self.assertError("FORBIDDEN", bff.files.put, f"{top}bff-r-{run}.bin", b"x", acting_as=reader_xid, category="iam")
+        own = bff.files.put(f"{top}bff-u-{run}.bin", b"x", acting_as=user_xid)
+        self.assertEqual(own["uploaded_by"]["xid"], user_xid)
+        bff.files.delete(own, acting_as=user_xid)
+        self.assertIsNone(bff.files.info(own))
+        self.assertError("NOT_TRUSTED", admin.files.info, f, acting_as=reader_xid)
 
         # 5. links for browsers
         note_path = f"{top}{self.name('note.txt')}"

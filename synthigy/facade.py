@@ -35,7 +35,7 @@ async def _invoke(fn, *a, **kw):
 
 class Client:
     def __init__(self, endpoint=None, *, client_id=None, client_secret=None,
-                 token=None, scope=None, audience=None, acting_as=None,
+                 token=None, scope=None, audience=None,
                  key_format=None, timeout=None, keep_alive=False, on_op=None,
                  login_store=None):
         """
@@ -47,7 +47,6 @@ class Client:
                        mint (defaults to $SYNTHIGY_AUDIENCE). The platform's
                        audience model is opt-in: a mint naming none resolves
                        to the identity-only OIDC audience that /data rejects.
-        acting_as    : default impersonation, overridable per call
         key_format   : "kebab" | "snake" | "camel"; None = server default (snake)
         timeout      : per-request timeout in SECONDS; file bytes (files.put, download,
                        zip, serve) are exempt, a large file takes as long as it takes
@@ -68,7 +67,7 @@ class Client:
         endpoint = resolve_endpoint(endpoint)
         self._config = dict(endpoint=endpoint, client_id=client_id,
                             client_secret=client_secret, token=token,
-                            scope=scope, audience=audience, acting_as=acting_as,
+                            scope=scope, audience=audience,
                             key_format=key_format, timeout=timeout,
                             keep_alive=keep_alive, on_op=on_op,
                             login_store=login_store)

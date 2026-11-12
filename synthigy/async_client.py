@@ -549,6 +549,7 @@ class AsyncWatchHandle:
         self._muted: dict = {}        # request-id -> monotonic expiry
         self._registered = False
         self._closed = False
+        self._subscribed = asyncio.Event()
         # a default sink so `async for ev in handle` works without an
         # explicit events() call, and internal composition (QueryWatch,
         # SqlTemplateWatch) has one dedicated buffer to read/manipulate.
@@ -581,9 +582,12 @@ class AsyncWatchHandle:
         await self._client._mux.register(self)
 
     async def ready(self, timeout=None):
+        """Register, then wait until the engine holds a subscription covering
+        this handle (or it failed; a subscription/rejected event says so)."""
         await self.register()
-        await self._client._mux.wait_open(
-            timeout=timeout or self._client._timeout)
+        wait = timeout or self._client._timeout
+        await self._client._mux.wait_open(timeout=wait)
+        await asyncio.wait_for(self._subscribed.wait(), timeout=wait)
 
     def add(self, xids):
         """Widen the record interest (live — re-syncs the union)."""
@@ -630,6 +634,7 @@ class AsyncWatchHandle:
 
     def _end(self):
         self._closed = True
+        self._subscribed.set()
         for buf in list(self._sinks):
             buf.close()
 
@@ -836,46 +841,53 @@ class AsyncWatchMultiplexer:
         union never re-POSTs."""
         async with self._flush_lock:
             watches = list(self._watches)
-            schema_sinks = bool(self._schema_watches)
-            if not watches:
-                if self._keep_alive:
-                    return  # pinned session keeps its server-side state
-                items = ([{"type": "runtime-model"}]
-                         if (self._want_schema and schema_sinks) else [])
-            else:
-                records, entities, relations, ops = set(), set(), set(), set()
-                any_ops = False
+            try:
+                await self._post_union(watches)
+            finally:
                 for h in watches:
-                    interest = h.interest
-                    records.update(interest.get("records") or [])
-                    entities.update(interest.get("entities") or [])
-                    relations.update(interest.get("relations") or [])
-                    if interest.get("ops"):
-                        any_ops = True
-                        ops.update(interest["ops"])
-                items = []
-                if records:
-                    item = {"type": "data", "records": sorted(records)}
-                    if any_ops:
-                        item["operations"] = sorted(ops)
-                    items.append(item)
-                if entities:
-                    items.append({"type": "entity", "entities": sorted(entities)})
-                if relations:
-                    items.append({"type": "relation",
-                                  "relations": sorted(relations)})
-                if self._want_schema:
-                    items.append({"type": "runtime-model"})
-            sig = json.dumps(items)
-            if sig == self._last_union:
-                return
-            await self._client.set_subscriptions(items)
-            # Record the signature only AFTER the POST succeeds. Recording
-            # it first (thread-mux ordering) let a cancellation between the
-            # two leave the server's set stale while the dedup skipped
-            # every retry of the same union — threads can't be cancelled
-            # mid-function, coroutines can.
-            self._last_union = sig
+                    h._subscribed.set()
+
+    async def _post_union(self, watches):
+        schema_sinks = bool(self._schema_watches)
+        if not watches:
+            if self._keep_alive:
+                return  # pinned session keeps its server-side state
+            items = ([{"type": "runtime-model"}]
+                     if (self._want_schema and schema_sinks) else [])
+        else:
+            records, entities, relations, ops = set(), set(), set(), set()
+            any_ops = False
+            for h in watches:
+                interest = h.interest
+                records.update(interest.get("records") or [])
+                entities.update(interest.get("entities") or [])
+                relations.update(interest.get("relations") or [])
+                if interest.get("ops"):
+                    any_ops = True
+                    ops.update(interest["ops"])
+            items = []
+            if records:
+                item = {"type": "data", "records": sorted(records)}
+                if any_ops:
+                    item["operations"] = sorted(ops)
+                items.append(item)
+            if entities:
+                items.append({"type": "entity", "entities": sorted(entities)})
+            if relations:
+                items.append({"type": "relation",
+                              "relations": sorted(relations)})
+            if self._want_schema:
+                items.append({"type": "runtime-model"})
+        sig = json.dumps(items)
+        if sig == self._last_union:
+            return
+        await self._client.set_subscriptions(items)
+        # Record the signature only AFTER the POST succeeds. Recording
+        # it first (thread-mux ordering) let a cancellation between the
+        # two leave the server's set stale while the dedup skipped
+        # every retry of the same union — threads can't be cancelled
+        # mid-function, coroutines can.
+        self._last_union = sig
 
     async def register(self, handle):
         self._ensure_task()
@@ -1013,6 +1025,8 @@ class AsyncQueryWatch:
         self._handle = AsyncWatchHandle(self._client,
                                         self._interest_for(rows))
         await self._handle.ready(timeout=timeout)
+        # writes between the snapshot and the subscription sent no event
+        self._pending.extend(await self._do_refresh(None))
 
     def initial(self):
         """First page of rows, server order. None until ready."""
@@ -1175,6 +1189,8 @@ class AsyncSqlTemplateWatch:
             interest["records"] = list(self._records_opt)
         self._handle = AsyncWatchHandle(self._client, interest)
         await self._handle.ready(timeout=timeout)
+        # writes between the snapshot and the subscription sent no event
+        self._value = await self._fetch()
 
     def value(self):
         return self._value
@@ -1381,7 +1397,7 @@ class AsyncClient:
     Prometheus/OTel yourself, the SDK takes no dependency."""
 
     def __init__(self, endpoint=None, *, client_id=None, client_secret=None,
-                 token=None, scope=None, audience=None, acting_as=None,
+                 token=None, scope=None, audience=None,
                  key_format=None, timeout=None, keep_alive=False, on_op=None,
                  login_store=None):
         """
@@ -1395,7 +1411,6 @@ class AsyncClient:
                        to the identity-only OIDC audience that /data rejects.
                        The server publishes its /data audience at
                        /.well-known/synthigy as auth.oidc.audience.
-        acting_as    : default impersonation, overridable per call
         key_format   : "kebab" | "snake" | "camel"; None = server default (snake)
         timeout      : per-request timeout in SECONDS (client default;
                        verbs also take a per-call timeout=)
@@ -1409,7 +1424,6 @@ class AsyncClient:
         """
         self._endpoint = resolve_endpoint(endpoint)
         self._data_url = self._endpoint + "/data"
-        self._default_acting_as = acting_as
         self._default_key_format = key_format
         self._timeout = timeout
         self._keep_alive = keep_alive
@@ -1563,9 +1577,8 @@ class AsyncClient:
         the service client's. timeout= is a per-call deadline overriding
         the client-level one."""
         body = {"operations": operations}
-        aa = acting_as if acting_as is not None else self._default_acting_as
-        if aa:
-            body["acting_as"] = aa
+        if acting_as:
+            body["acting_as"] = acting_as
         kf = key_format if key_format is not None else self._default_key_format
         if kf:
             body["key_format"] = kf
@@ -1601,7 +1614,7 @@ class AsyncClient:
         return await self._search(entity, args, selection, **opts)
 
     async def get(self, entity, args=None, selection=None, **opts):
-        # get takes FLAT unique-constraint values — no _eq wrapping, no _where
+        # get takes FLAT unique-constraint values — no _eq wrapping
         return await self._one({"op": "get", "entity": entity, "args": args,
                                 "selections": normalize_selection(selection)},
                                **opts)
