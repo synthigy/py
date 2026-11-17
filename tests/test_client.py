@@ -234,6 +234,10 @@ class TestEnvelope(ClientTestCase):
         op = self.last_data_body()["operations"][0]
         self.assertEqual(op, {"op": "delete", "entity": "dataset", "data": {"xid": "ds-1"}})
 
+    def test_destroy_answers_true_on_null_data(self):
+        self.srv.route("/data", (200, ok_results(None)))
+        self.assertIs(self.static_client().destroy("ds-1"), True)
+
     def test_exec_batch_order(self):
         self.srv.route("/data", (200, ok_results({"xid": "a"}, True)))
         c = self.static_client()
@@ -334,6 +338,39 @@ class TestErrors(ClientTestCase):
             self.static_client().query("nope")
         self.assertEqual((cm.exception.line, cm.exception.col), (3, 7))
 
+    RULED = {"rule": "relation_data", "attribute": "file", "doc": "errors/relation_data"}
+
+    def ruled(self, e):
+        return (e.rule, e.attribute, e.doc)
+
+    def test_per_op_error_keeps_rule_attribute_doc(self):
+        self.srv.route("/data", (200, {"results": [{
+            "ok": False,
+            "error": {"message": "bad", "code": "BAD_DATA_SHAPE", **self.RULED}}]}))
+        with self.assertRaises(SynthigyError) as cm:
+            self.static_client().stack("document", {"file": "f-1"})
+        self.assertEqual(self.ruled(cm.exception),
+                         ("relation_data", "file", "errors/relation_data"))
+
+    def test_top_level_error_keeps_rule_attribute_doc(self):
+        self.srv.route("/data",
+                       (400, {"error": {"message": "bad", "code": "BAD_ARGS_SHAPE", **self.RULED}}),
+                       (200, {"error": {"message": "bad", "code": "BAD_ARGS_SHAPE", **self.RULED}}))
+        for status in (400, None):
+            with self.assertRaises(SynthigyError) as cm:
+                self.static_client().search("User", None, None)
+            self.assertEqual(self.ruled(cm.exception),
+                             ("relation_data", "file", "errors/relation_data"))
+            self.assertEqual(getattr(cm.exception, "status", None), status)
+
+    def test_absent_rule_attribute_doc_stay_absent(self):
+        self.srv.route("/data", (200, {"results": [{
+            "ok": False, "error": {"message": "x", "code": "FK_VIOLATION"}}]}))
+        with self.assertRaises(SynthigyError) as cm:
+            self.static_client().search("User", None, None)
+        for k in ("hint", "rule", "attribute", "doc"):
+            self.assertFalse(hasattr(cm.exception, k), k)
+
     def test_network_error(self):
         c = Client("http://127.0.0.1:1", token="tok", timeout=0.2)
         with self.assertRaises(SynthigyError) as cm:
@@ -352,6 +389,9 @@ class TestAuth(ClientTestCase):
         self.assertEqual(ctx.exception.code, "NO_TOKEN")
         self.assertEqual(ctx.exception.category, "auth")
         self.assertFalse(ctx.exception.retryable)
+        for fix in ("SYNTHIGY_TOKEN", "synthigy exec", "connect()"):
+            self.assertIn(fix, ctx.exception.message)
+        self.assertNotIn("SYNTHIGY_CLIENT_ID", ctx.exception.message)
 
     def test_endpoint_defaults_to_env(self):
         with unittest.mock.patch.dict("os.environ", {"SYNTHIGY_ENDPOINT": self.srv.endpoint}):
@@ -513,6 +553,70 @@ class TestIntrospection(ClientTestCase):
             self.static_client().compile("movie (\n")
         self.assertEqual(cm.exception.code, "XSQL_PARSE_ERROR")
 
+    def test_compile_history_subscription_errors_keep_server_fields(self):
+        err = {"message": "no", "code": "XSQL_PARSE_ERROR", "hint": "h",
+               "rule": "operation_shape", "attribute": "title",
+               "doc": "errors/operation_shape"}
+        self.srv.route("/compile", (200, {"results": [{"ok": False, "error": err}]}))
+        self.srv.route("/history", (400, {"error": err}))
+        self.srv.route("/data/subscription/set", (400, {"error": err}))
+        self.srv.route("/data/subscription/status", (400, {"error": err}))
+        c = self.static_client()
+        for name, call in (("compile", lambda: c.compile("movie (\n")),
+                           ("history", lambda: c.history.events()),
+                           ("subscribe", lambda: c.subscribe(["m-1"])),
+                           ("subscriptions", lambda: c.subscriptions())):
+            with self.assertRaises(SynthigyError) as cm:
+                call()
+            e = cm.exception
+            self.assertEqual((e.message, e.code, e.hint, e.rule, e.attribute, e.doc),
+                             ("no", "XSQL_PARSE_ERROR", "h", "operation_shape", "title",
+                              "errors/operation_shape"), name)
+            self.assertEqual(e.status, 200 if name == "compile" else 400, name)
+
+    def test_schema_lint_compile_errors_keep_server_fields(self):
+        err = {"message": "no", "code": "NO_OPERATIONS", "hint": "h",
+               "rule": "operation_shape", "attribute": "title",
+               "doc": "errors/operation_shape"}
+        for path in ("/schema", "/lint", "/compile"):
+            self.srv.route(path, (400, {"error": err}))
+        c = self.static_client()
+        for name, call in (("schema", lambda: c.schema()),
+                           ("lint", lambda: c.lint("movie\n  title\n")),
+                           ("compile", lambda: c.compile("movie\n  title\n"))):
+            with self.assertRaises(SynthigyError) as cm:
+                call()
+            e = cm.exception
+            self.assertEqual((e.message, e.code, e.hint, e.rule, e.attribute, e.doc, e.status),
+                             ("no", "NO_OPERATIONS", "h", "operation_shape", "title",
+                              "errors/operation_shape", 400), name)
+
+    def test_schema_lint_compile_errors_default_without_an_error_object(self):
+        for path in ("/schema", "/lint", "/compile"):
+            self.srv.route(path, (502, "bad gateway"))
+        c = self.static_client()
+        for name, call in (("schema", lambda: c.schema()),
+                           ("lint", lambda: c.lint("movie\n  title\n")),
+                           ("compile", lambda: c.compile("movie\n  title\n"))):
+            with self.assertRaises(SynthigyError) as cm:
+                call()
+            e = cm.exception
+            self.assertEqual((e.code, e.message, e.status),
+                             ("HTTP_ERROR", f"{name} request failed (502)", 502), name)
+
+    def test_history_and_subscription_errors_default_without_an_error_object(self):
+        self.srv.route("/history", (502, "bad gateway"))
+        self.srv.route("/data/subscription/set", (502, "bad gateway"))
+        c = self.static_client()
+        with self.assertRaises(SynthigyError) as cm:
+            c.history.events()
+        self.assertEqual((cm.exception.code, cm.exception.message),
+                         ("HTTP_ERROR", "History op 'events' failed (502)"))
+        with self.assertRaises(SynthigyError) as cm:
+            c.subscribe(["m-1"])
+        self.assertEqual((cm.exception.code, cm.exception.message),
+                         ("HTTP_ERROR", "Subscription set failed"))
+
 
 class TestOnboarding(ClientTestCase):
     def test_onboard_success(self):
@@ -553,6 +657,19 @@ class TestOnboarding(ClientTestCase):
         self.assertEqual(ctx.exception.code, "USER_NOT_FOUND")
         self.assertEqual(ctx.exception.category, "auth")
         self.assertEqual(ctx.exception.status, 404)
+
+    def test_onboard_error_object_keeps_server_fields(self):
+        for path, call in (("/oauth/onboard", lambda c: c.onboard("user-xid-1")),
+                           ("/oauth/onboard/complete", lambda c: c.onboard_complete("t"))):
+            self.srv.route(path, (503, {"error": {
+                "message": "oauth is not loaded", "code": "MODULE_NOT_LOADED",
+                "hint": "h", "rule": "stamp", "doc": "errors/stamp"}}))
+            with self.assertRaises(SynthigyError) as ctx:
+                call(self.static_client())
+            e = ctx.exception
+            self.assertEqual((e.message, e.code, e.hint, e.rule, e.doc, e.status),
+                             ("oauth is not loaded", "MODULE_NOT_LOADED", "h", "stamp",
+                              "errors/stamp", 503), path)
 
     def test_onboard_non_json_error_body_does_not_crash(self):
         # A route-not-found 404 (proxy/SPA fallback) returns plain text, not

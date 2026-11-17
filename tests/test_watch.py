@@ -494,5 +494,34 @@ class TestEndToEnd(WatchTestCase):
         w.close()
 
 
+
+REJECTION = {"message": "no", "code": "FORBIDDEN", "hint": "h",
+             "rule": "stamp", "doc": "errors/stamp"}
+
+
+class TestRejectedCarriesTheError(WatchTestCase):
+    def assert_carries(self, ev):
+        self.assertEqual(ev["type"], "subscription/rejected")
+        e = ev["error"]
+        self.assertIsInstance(e, SynthigyError)
+        self.assertEqual(ev["reason"], str(e))
+        self.assertEqual((e.code, e.hint, e.rule, e.doc),
+                         ("FORBIDDEN", "h", "stamp", "errors/stamp"))
+
+    def test_refused_subscribe(self):
+        self.srv.route("/data/subscription/set", (403, {"error": REJECTION}))
+        w = self.client().watch({"records": ["r-1"]})
+        q = pump(w.events())
+        self.assert_carries(q.get(timeout=5))
+        w.close()
+
+    def test_refused_query_watch(self):
+        self.srv.route("/data", (200, {"results": [{"ok": False, "error": REJECTION}]}))
+        qw = self.client().watch_query("movie", {}, {"title": None})
+        self.addCleanup(qw.close)
+        q = pump(qw.events())
+        self.assert_carries(q.get(timeout=5))
+
+
 if __name__ == "__main__":
     unittest.main()

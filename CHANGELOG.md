@@ -3,6 +3,40 @@
 All notable changes to `synthigy` (PyPI). Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.5.0
+
+### Added
+- **Errors keep `rule`, `attribute` and `doc`.** `.rule` (the rule that refused),
+  `.attribute` and `.doc` (its manual section, read at `GET /docs/<doc>`) when the
+  server sends them, at the top level and per operation. Per-operation `compile`
+  errors, `history`, subscription and generated `@batch` member errors keep the
+  same structured fields as every other error (`hint`, `details`, `retryable`,
+  `rule`, `attribute`, `doc`, …), not only the message and code; regenerate for
+  the `@batch` change. `history` and subscription errors carry `.status` too.
+- **`"error"` on `subscription/rejected`**: the `SynthigyError` that refused the
+  subscribe or the watch's first query (`code`, `hint`, `rule`, `doc`, …), beside
+  the unchanged `"reason"`.
+
+### Fixed
+- `destroy` returns `True` once the operation succeeds, also when the engine
+  answers `null`.
+- `schema()`, `lint()` and `compile()` answered every non-2xx with `HTTP_ERROR`;
+  when the reply carries the server's error, they raise it, its code and fields
+  included.
+- `onboard` / `onboard_complete` raised `AttributeError` on an engine error
+  object (a router 404, a 500, a 503 `MODULE_NOT_LOADED`); they raise the
+  engine's error, its code and fields included. Bare-string codes are unchanged.
+- A generated module without `@batch` raised `NameError` instead of
+  `PARAM_UNKNOWN` for an unknown param; regenerate.
+- The `NO_TOKEN` message offered `SYNTHIGY_CLIENT_ID` + `SYNTHIGY_CLIENT_SECRET`,
+  which the client never reads from the environment. It names what works:
+  `SYNTHIGY_TOKEN`, `synthigy exec`, or `client_id` and `client_secret` passed to
+  `connect()`.
+- SSE connect (`listen`, `observe`, watches) raises the engine's error from the response
+  body, its hint, rule and doc included. A 403 ends the stream whatever its code.
+- Code generator describe failures show the engine's position, hint and manual section
+  (`docs: <endpoint>/docs/<doc>`), not only the code and message.
+
 ## 0.4.0
 
 Needs engine v0.5.0 or later.

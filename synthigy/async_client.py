@@ -225,6 +225,23 @@ async def _read_chunked(reader):
     return bytes(out)
 
 
+async def _sse_error_body(reader, headers, timeout):
+    """The `error` object of a refused SSE connect's JSON body, or None."""
+    try:
+        if "content-length" in headers:
+            n = int(headers["content-length"])
+            read = reader.readexactly(n) if n else None
+        elif headers.get("transfer-encoding", "").lower() == "chunked":
+            read = _read_chunked(reader)
+        else:
+            read = reader.read(65536)
+        data = await asyncio.wait_for(read, timeout=timeout or 10) if read else b""
+        err = json.loads(data).get("error")
+        return err if isinstance(err, dict) else None
+    except Exception:
+        return None
+
+
 async def _open_sse(endpoint, token, last_event_id=None, timeout=None):
     """Open the SSE GET, parse status+headers, leave the reader positioned
     at the frame stream. Dedicated connection (not pooled) — SSE blocks
@@ -264,11 +281,14 @@ async def _open_sse(endpoint, token, last_event_id=None, timeout=None):
     if status == 401:
         writer.close()
         raise SynthigyError("Unauthorized", "UNAUTHORIZED", status=401)
-    if status == 403:
-        writer.close()
-        raise SynthigyError("Forbidden", "FORBIDDEN", status=403)
     if not 200 <= status < 300:
+        err = await _sse_error_body(reader, resp_headers, timeout)
         writer.close()
+        if status == 403:
+            raise error_from_server(
+                err or {"message": "Forbidden", "code": "FORBIDDEN"}, 403)
+        if err:
+            raise error_from_server(err, status)
         raise SynthigyError(f"SSE connect failed ({status})", "HTTP_ERROR",
                             status=status)
     # Real servers stream SSE with Transfer-Encoding: chunked (the correct
@@ -737,7 +757,7 @@ class AsyncWatchMultiplexer:
         stream (buffer close → StopAsyncIteration). Without this the task
         died silently and every watch went deaf forever."""
         sentinel = {"type": "subscription/rejected", "reason": str(exc),
-                    "records": []}
+                    "error": exc, "records": []}
         for h in list(self._watches):
             h._push(sentinel)
             h._end()
@@ -815,7 +835,7 @@ class AsyncWatchMultiplexer:
                     writer.close()
                     self._opened.clear()
             except SynthigyError as e:
-                if e.code in ("UNAUTHORIZED", "FORBIDDEN"):
+                if e.code in ("UNAUTHORIZED", "FORBIDDEN") or e.status == 403:
                     self._fatal(e)
                     raise
             except (OSError, ConnectionError):
@@ -830,7 +850,8 @@ class AsyncWatchMultiplexer:
                 await self._flush()
             except SynthigyError as e:
                 self._fan_out_sentinel({"type": "subscription/rejected",
-                                        "reason": str(e), "records": []})
+                                        "reason": str(e), "error": e,
+                                        "records": []})
             if not self._flush_dirty:
                 return
 
@@ -1294,9 +1315,8 @@ class AsyncHistoryAPI:
             except ValueError:
                 parsed = {}
             err = parsed.get("error") or {} if isinstance(parsed, dict) else {}
-            raise SynthigyError(
-                err.get("message", f"History op '{op}' failed ({status})"),
-                err.get("code", "HTTP_ERROR"))
+            raise error_from_server({"message": f"History op '{op}' failed ({status})",
+                                     "code": "HTTP_ERROR", **err}, status)
         return json.loads(data).get("result")
 
     async def get_at(self, record_xid, at, *, tenant=None, include_deleted=None):
@@ -1353,19 +1373,29 @@ class AsyncHistoryAPI:
         return await self._post("since", opts)
 
 
+def _http_error(data, status, message):
+    """The server's error from a non-2xx reply's body, else HTTP_ERROR with `message`."""
+    try:
+        parsed = json.loads(data) if data else None
+    except ValueError:
+        parsed = None
+    err = parsed.get("error") if isinstance(parsed, dict) else None
+    if not isinstance(err, dict):
+        return SynthigyError(message, "HTTP_ERROR", status=status)
+    return error_from_server({**err, "message": err.get("message") or message,
+                              "code": err.get("code") or "HTTP_ERROR"}, status)
+
+
 def _parse_onboard_response(data, status, label):
-    """Shared response handling for /oauth/onboard and
-    /oauth/onboard/complete. Wire shape on error here is
-    {"error": "<snake_case_code>"} — a bare string, unlike the
-    {"error": {"code", "message"}} envelope /data uses — so it's handled
-    separately rather than through error_from_server (which would silently
-    miss the code on a string)."""
+    """The /oauth/onboard[/complete] reply; its error is a bare string code unless the server sent its error object."""
     try:
         parsed = json.loads(data) if data else None
     except ValueError:
         parsed = None
     if not 200 <= status < 300:
         err = (parsed or {}).get("error") if isinstance(parsed, dict) else None
+        if isinstance(err, dict):
+            raise _http_error(data, status, f"{label} request failed ({status})")
         if err:
             raise SynthigyError(f"{label} failed: {err}", err.upper(),
                                 status=status)
@@ -1710,8 +1740,9 @@ class AsyncClient:
     async def destroy(self, dataset_xid, **opts):
         """Destroy a dataset — every version, table and row. Requires
         dataset:delete. Idempotent."""
-        return await self._one(
+        await self._one(
             {"op": "delete", "entity": "dataset", "data": {"xid": dataset_xid}}, **opts)
+        return True
 
     async def deployed_model(self, **opts):
         return await self._one({"op": "deployed-model"}, **opts)
@@ -1731,8 +1762,7 @@ class AsyncClient:
             path += "?" + urllib.parse.urlencode({"entities": ",".join(entities)})
         status, _h, data = await self._authed("GET", path)
         if not 200 <= status < 300:
-            raise SynthigyError(f"schema request failed ({status})",
-                                "HTTP_ERROR", status=status)
+            raise _http_error(data, status, f"schema request failed ({status})")
         return json.loads(data)
 
     async def lint(self, source, *, entity=None, op=None):
@@ -1746,8 +1776,7 @@ class AsyncClient:
             "POST", "/lint", body=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"})
         if not 200 <= status < 300:
-            raise SynthigyError(f"lint request failed ({status})",
-                                "HTTP_ERROR", status=status)
+            raise _http_error(data, status, f"lint request failed ({status})")
         return json.loads(data).get("diagnostics", [])
 
     async def compile(self, source, params=None, *, op="search"):
@@ -1764,18 +1793,15 @@ class AsyncClient:
             "POST", "/compile", body=json.dumps({"operations": [o]}).encode(),
             headers={"Content-Type": "application/json"})
         if not 200 <= status < 300:
-            raise SynthigyError(f"compile request failed ({status})",
-                                "HTTP_ERROR", status=status)
+            raise _http_error(data, status, f"compile request failed ({status})")
         results = json.loads(data).get("results") or []
         if not results:
             raise SynthigyError("compile returned no results",
                                 "INTERNAL_ERROR", status=status)
         result = results[0]
         if not result.get("ok"):
-            err = result.get("error") or {}
-            raise SynthigyError(err.get("message", "compile failed"),
-                                err.get("code", "XSQL_PARSE_ERROR"),
-                                status=status)
+            raise error_from_server({"message": "compile failed", "code": "XSQL_PARSE_ERROR",
+                                     **(result.get("error") or {})}, status)
         return result["operation"]
 
     async def onboard(self, xid, *, reset=None, methods=None,
@@ -1904,8 +1930,8 @@ class AsyncClient:
             parsed = {}
         if not 200 <= status < 300:
             err = parsed.get("error") or {} if isinstance(parsed, dict) else {}
-            raise SynthigyError(err.get("message", "Subscription set failed"),
-                                err.get("code", "HTTP_ERROR"))
+            raise error_from_server({"message": "Subscription set failed",
+                                     "code": "HTTP_ERROR", **err}, status)
         return parsed
 
     async def _flush_subscriptions_safe(self):
@@ -1998,8 +2024,8 @@ class AsyncClient:
             parsed = {}
         if not 200 <= status < 300:
             err = parsed.get("error") or {} if isinstance(parsed, dict) else {}
-            raise SynthigyError(err.get("message", "Subscription status failed"),
-                                err.get("code", "HTTP_ERROR"))
+            raise error_from_server({"message": "Subscription status failed",
+                                     "code": "HTTP_ERROR", **err}, status)
         return parsed
 
     # ── raw streaming ──────────────────────────────────────────────────
@@ -2039,7 +2065,7 @@ class AsyncClient:
                 finally:
                     writer.close()
             except SynthigyError as e:
-                if e.code in ("UNAUTHORIZED", "FORBIDDEN"):
+                if e.code in ("UNAUTHORIZED", "FORBIDDEN") or e.status == 403:
                     raise
             except (OSError, ConnectionError):
                 pass
@@ -2083,7 +2109,7 @@ class AsyncClient:
                     finally:
                         writer.close()
                 except SynthigyError as e:
-                    if e.code in ("UNAUTHORIZED", "FORBIDDEN"):
+                    if e.code in ("UNAUTHORIZED", "FORBIDDEN") or e.status == 403:
                         raise
 
                 if backfill and last_seen_ts:

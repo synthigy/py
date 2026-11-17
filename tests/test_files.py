@@ -88,6 +88,9 @@ class _FilesStub(BaseHTTPRequestHandler):
             self._json(404, {"error": {"code": "FILE_NOT_FOUND", "message": "No such file"}})
         elif path == "/files/f3/info":
             self._json(503, {"error": {"code": "AUDIT_UNAVAILABLE", "message": "down"}})
+        elif path == "/files/f4/info":
+            self._json(403, {"error": {"code": "ATTRIBUTE_FORBIDDEN", "message": "no", "rule": "stamp",
+                                       "attribute": "modified_by", "doc": "errors/stamp"}})
         elif path.endswith("/versions"):
             self._json(200, {"xid": "f1", "versions": [{"id": 7, "at": "2026-10-29T17:40:12.532Z",
                                                          "by": "u1", "current": True}]})
@@ -203,6 +206,14 @@ class FilesTest(unittest.TestCase):
         self.assertEqual((e.code, e.category), ("INVALID_QUERY", "validation"))
         self.assertEqual(self.code(lambda: self.c.files.download("zz")).code, "FILES_UNAVAILABLE")
         self.assertEqual(self.code(lambda: self.c.files.versions("/gone.txt")).code, "FILE_NOT_FOUND")
+
+    def test_refusal_keeps_rule_attribute_doc(self):
+        e = self.code(lambda: self.c.files.info("f4"))
+        self.assertEqual((e.code, e.status, e.rule, e.attribute, e.doc),
+                         ("ATTRIBUTE_FORBIDDEN", 403, "stamp", "modified_by", "errors/stamp"))
+        e = self.code(lambda: self.c.files.info("f3"))
+        for k in ("rule", "attribute", "doc"):
+            self.assertFalse(hasattr(e, k), k)
 
     def test_download(self):
         self.assertEqual(self.c.files.download("f1"), b"0123456789")

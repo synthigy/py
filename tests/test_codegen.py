@@ -265,6 +265,23 @@ class TestGeneratedWire(unittest.TestCase):
         self.assertIsInstance(out["stats"], SynthigyError)
         self.assertEqual(out["stats"].code, "TEMPLATE_ERROR")
 
+    def test_batch_error_value_keeps_server_fields(self):
+        self.srv.route("/data", (200, {"results": [
+            {"ok": False, "error": {"message": "bad", "code": "BAD_DATA_SHAPE", "hint": "h",
+                                    "rule": "relation_data", "attribute": "file",
+                                    "doc": "errors/relation_data", "retryable": True}},
+            {"ok": False},
+        ]}))
+        out = self.gen.overview({"limit": 1})
+        e = out["list"]
+        self.assertEqual((e.message, e.code, e.hint, e.rule, e.attribute, e.doc, e.retryable),
+                         ("bad", "BAD_DATA_SHAPE", "h", "relation_data", "file",
+                          "errors/relation_data", True))
+        bare = out["stats"]
+        self.assertEqual((bare.message, bare.code), ("operation failed", "OPERATION_FAILED"))
+        for k in ("hint", "rule", "attribute", "doc"):
+            self.assertFalse(hasattr(bare, k), k)
+
     def test_write_fns_wire_body(self):
         self.srv.route("/data", (200, ok_results({"xid": "g1", "name": "N"})))
         self.gen.sync_movie_genre({"xid": "g1", "name": "N"})
@@ -291,6 +308,23 @@ class TestGeneratedWire(unittest.TestCase):
             self.gen.Movie.list({"limt": 1})
         self.assertEqual(cm.exception.code, "PARAM_UNKNOWN")
         self.assertIn("limt", cm.exception.message)
+        self.assertEqual(self.srv.requests_to("/data"), [])
+
+    def test_unknown_param_rejected_without_a_batch(self):
+        ir, schema = load_fixtures()
+        ir = dict(ir, operations=[o for o in ir["operations"] if not o.get("batch")])
+        code = codegen.render(ir, schema, input_name="example.xsql")
+        self.assertNotIn("def overview(", code)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        gen_path = Path(tmp.name) / "example_gen_nobatch.py"
+        gen_path.write_text(code)
+        spec = importlib.util.spec_from_file_location("example_gen_nobatch", gen_path)
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        with self.assertRaises(SynthigyError) as cm:
+            gen.Movie.list({"limt": 1})
+        self.assertEqual(cm.exception.code, "PARAM_UNKNOWN")
         self.assertEqual(self.srv.requests_to("/data"), [])
 
     def test_batch_rejects_per_member_nesting(self):
@@ -498,3 +532,21 @@ class WarnStaleSchemaTest(unittest.TestCase):
         path.write_text('{"datasets":{"A":{"deployed-at":"2026-09-15T07:47:15.698Z"}}}')
         self.assertIn("stale", run(endpoint))
         self.assertEqual(run(None), "")
+
+
+class DescribeFailureTest(unittest.TestCase):
+    def test_names_the_position_hint_and_manual_section(self):
+        err = SynthigyError("bad token", "XSQL_PARSE_ERROR", line=3, col=5,
+                            hint="close the brace", doc="errors/xsql_parse")
+        ir_path = Path(tempfile.mkdtemp()) / "ops.ir.json"
+        printed = io.StringIO()
+        with mock.patch.object(codegen, "_env_client", return_value=None), \
+                mock.patch.object(codegen, "describe", side_effect=err), \
+                redirect_stderr(printed):
+            with self.assertRaises(codegen.CodegenError):
+                codegen._load_ir(ir_path, "src", [], endpoint="http://x:7887/")
+        self.assertEqual(printed.getvalue().splitlines()[:4], [
+            "codegen: describe failed: XSQL_PARSE_ERROR: bad token",
+            "  at line 3, col 5",
+            "  hint: close the brace",
+            "  docs: http://x:7887/docs/errors/xsql_parse"])

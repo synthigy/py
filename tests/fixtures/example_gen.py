@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover
 import synthigy
 from synthigy import SynthigyError
 from synthigy import ops as _ops
+from synthigy.errors import error_from_server
 
 
 
@@ -50,10 +51,9 @@ def _batch_result(result: dict, op: str) -> Any:
     """Per-member unwrap: ok → data (get → record|None, else → list);
     error → a SynthigyError VALUE (the batch itself never raises)."""
     if not result.get("ok"):
-        err = result.get("error") or {}
-        return SynthigyError(err.get("message", "operation failed"),
-                             err.get("code", "OPERATION_FAILED"),
-                             err.get("details"))
+        return error_from_server({"message": "operation failed",
+                                  "code": "OPERATION_FAILED",
+                                  **(result.get("error") or {})})
     data = result.get("data")
     if op == "get":
         return data

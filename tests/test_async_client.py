@@ -415,6 +415,38 @@ class TestWritesAndBatch(AsyncSpikeTestCase):
         self.assertEqual(len(self.data_bodies()), 1)  # ONE round trip
         self.assertEqual(len(self.data_bodies()[0]["operations"]), 2)
 
+    def test_errors_keep_rule_attribute_doc(self):
+        err = {"message": "bad", "code": "BAD_DATA_SHAPE", "rule": "relation_data",
+               "attribute": "file", "doc": "errors/relation_data"}
+        self.srv.route("/data", (200, {"results": [{"ok": False, "error": err}]}),
+                       (403, {"error": err}))
+
+        async def run():
+            client = AsyncClient(self.srv.endpoint, token="tok")
+            try:
+                for _ in ("per-op", "top-level"):
+                    with self.assertRaises(SynthigyError) as cm:
+                        await client.stack("document", {"file": "f-1"})
+                    e = cm.exception
+                    self.assertEqual((e.rule, e.attribute, e.doc),
+                                     ("relation_data", "file", "errors/relation_data"))
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+
+    def test_destroy_answers_true_on_null_data(self):
+        self.srv.route("/data", (200, ok_results(None)))
+
+        async def run():
+            client = AsyncClient(self.srv.endpoint, token="tok")
+            try:
+                self.assertIs(await client.destroy("ds-1"), True)
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+
 
 class TestSse401Retry(AsyncSpikeTestCase):
     def test_sse_401_clears_token_and_retries_once(self):

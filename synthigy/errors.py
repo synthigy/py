@@ -3,7 +3,7 @@
 Always present: .message, .code, .category, .retryable.
 Optional (when the server included them): .details, .hint, .available,
 .path, .entity, .relation, .operator, .request_id, .status, .line, .col,
-.start, .end, .diagnostics.
+.start, .end, .diagnostics, .rule, .attribute, .doc.
 
 Discriminate on .code (stable), never .message.
 """
@@ -146,7 +146,7 @@ RETRYABLE_CATEGORIES = {"network", "rate_limit", "internal"}
 # Optional structured fields copied verbatim off a server error object.
 _EXTRA_FIELDS = (
     "hint", "available", "path", "entity", "relation", "operator",
-    "line", "col", "start", "end", "diagnostics",
+    "line", "col", "start", "end", "diagnostics", "rule", "attribute", "doc",
 )
 
 

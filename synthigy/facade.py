@@ -469,7 +469,7 @@ class _BootstrappedWatch:
                 self._ready_fut.result()
             except Exception as e:
                 yield {"type": "subscription/rejected", "reason": str(e),
-                       "records": []}
+                       "error": e, "records": []}
                 return
             while True:
                 try:
@@ -502,7 +502,7 @@ class _FanOutMixin:
                 self._ready_fut.result()
             except Exception as e:
                 yield {"type": "subscription/rejected", "reason": str(e),
-                       "records": []}
+                       "error": e, "records": []}
                 return
             agen = self._facade._on_loop(self._aw.events)
             while True:

@@ -189,6 +189,23 @@ class TestListen(SseTestCase):
             next(iter(self.client().listen()))
         self.assertEqual(cm.exception.code, "FORBIDDEN")
 
+    def test_refusal_keeps_the_engines_error(self):
+        self.srv.route("/data/events", (403, {"error": {
+            "message": "no", "code": "FORBIDDEN", "hint": "h",
+            "rule": "stamp", "doc": "errors/stamp"}}))
+        with self.assertRaises(SynthigyError) as cm:
+            next(iter(self.client().listen()))
+        e = cm.exception
+        self.assertEqual((str(e), e.code, e.hint, e.rule, e.doc, e.status),
+                         ("no", "FORBIDDEN", "h", "stamp", "errors/stamp", 403))
+
+    def test_a_403_with_another_code_still_ends_the_stream(self):
+        self.srv.route("/data/events", (403, {"error": {
+            "message": "no scope", "code": "SCOPE_REQUIRED"}}))
+        with self.assertRaises(SynthigyError) as cm:
+            next(iter(self.client().listen()))
+        self.assertEqual(cm.exception.code, "SCOPE_REQUIRED")
+
     def test_malformed_frames_skipped(self):
         ev = {"type": "entity/touched", "entity": "movie"}
         self.srv.route("/data/events", sse_handler(

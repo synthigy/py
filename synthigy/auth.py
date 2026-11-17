@@ -281,7 +281,7 @@ def no_token_error():
     """The teaching throw: the error IS the UX,
     no flag, no silent anonymous fallback."""
     return SynthigyError(
-        "no Synthigy token: set SYNTHIGY_TOKEN, or SYNTHIGY_CLIENT_ID + "
-        "SYNTHIGY_CLIENT_SECRET, or run under `synthigy exec` (or a "
-        "Synthigy agent) so a parent can supply one.",
+        "no Synthigy token: set SYNTHIGY_TOKEN, run under `synthigy exec` "
+        "(or a Synthigy agent) so a parent can supply one, or pass "
+        "client_id and client_secret to connect().",
         "NO_TOKEN")

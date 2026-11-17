@@ -234,7 +234,7 @@ files.list("/site/")                            # {"files", "folders"}; None: no
 files.search("site logo")                       # paths holding the words in order, shortest first
 files.move("/site/img/logo.png", "/brand/")     # keeps the name; never overwrites
 files.move("/site/img/", "/assets/img/")        # a folder
-vs = files.versions(fi)                         # the last ten, newest first
+vs = files.versions(fi)                         # the last 100, newest first
 files.restore(fi, vs[1])
 z = files.zip(folders=["/site/img/"], files=["/notes/today.txt"])   # zip bytes; unreadable ones in _skipped.txt
 files.share("/site/", "read", users=[user_xid])
@@ -298,7 +298,9 @@ on the server), `LINKS_DISABLED` (iam: the folder does not allow links),
 Everything raises `synthigy.SynthigyError` with stable `.code`, derived
 `.category` (`auth | iam | validation | not_found | conflict | rate_limit |
 network | internal`) and `.retryable`. Structured fields when the server
-sends them: `.hint`, `.entity`, `.path`, `.line`/`.col`, `.diagnostics`,
+sends them: `.hint`, `.rule` (the rule that refused), `.doc` (its manual
+section, e.g. `errors/relation_data`, read at `GET /docs/errors/relation_data`),
+`.entity`, `.attribute`, `.path`, `.line`/`.col`, `.diagnostics`,
 `.request_id` (the `X-Request-Id` the server answered with — correlate with
 server logs). Discriminate on `.code`, never the message.
 
