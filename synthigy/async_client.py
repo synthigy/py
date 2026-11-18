@@ -22,14 +22,13 @@ noted):
     runtime model, schema, lint, history (get_at/events/diff/timeline/
     since), files (/files bytes, versions, folders)
   - streaming: listen() (raw SSE envelopes, infinite reconnect with
-    Last-Event-ID resume), observe() (one-call live primitive with
-    re-register-per-session + optional /history backfill across gaps)
-  - subscriptions: subscribe/unsubscribe/subscribe_model/set_subscriptions/
-    clear_subscriptions/subscriptions() — records-only full set-replace
-    wire (advanced; raw calls clobber a live watch multiplexer's union)
+    Last-Event-ID resume, a fresh stream id per connection)
+  - subscriptions: subscriptions() reads the engine's set; the set itself
+    is written only by the watch multiplexer
   - watch layer: one mux = one SSE + one consolidated subscription/set
-    union POST (signature-deduped, post-open flush, reconnect re-flush +
-    connection/resumed sentinel); schema tracking (runtime-model deploys
+    union POST naming that stream (signature-deduped, post-open flush,
+    reconnect re-flush + connection/resumed sentinel, opt-in /history
+    backfill across the gap); schema tracking (runtime-model deploys
     refresh the resolver and fan out schema/changed); AsyncWatchHandle
     (raw events, live add/remove/set_interest, mute_request, coalesce/
     lossless/sliding backpressure); AsyncQueryWatch (DERIVED
@@ -51,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import ssl
 import time
 import urllib.parse
@@ -60,13 +60,14 @@ from .compose import compose_forest, compose_tree
 from .errors import SynthigyError, error_from_server
 from .files import AsyncFilesAPI
 from .events import (
-    REFRESH_COALESCE, _collect_all_xids, _diff_row, _event_matches_descriptor,
-    _row_key, _rows_equal, _union_changed, descriptor_key, kebab, matches,
+    REFRESH_COALESCE, _collect_all_xids, _diff_row, _op_match, _row_key,
+    _rows_equal, _union_changed, descriptor_key, kebab, matches,
     normalize_descriptor, normalize_interest, shape_event,
 )
 from .login import REJECTING_LOGIN_STORE, AsyncLoginAPI
 from .selection import normalize_selection
-from .util import DEFAULT_TIMEOUT, generate_request_id, now_iso, xsql_document
+from .util import (DEFAULT_TIMEOUT, generate_request_id, generate_stream_id,
+                   now_iso, xsql_document)
 
 PLATFORM_AUDIENCE = "https://synthigy.com"
 """The platform API this SDK is a client of.
@@ -77,6 +78,20 @@ string on localhost and in production — which is why it is a constant rather
 than something every caller configures. Minting a token for some OTHER API is a
 per-call argument, not a property of the client.
 """
+
+
+BUSY_ATTEMPTS = 3
+BUSY_MAX_SECONDS = 10
+
+
+def busy_delay(retry_after):
+    """Seconds to wait before resending a SERVER_BUSY request: Retry-After (1 when absent) with ±50% jitter."""
+    try:
+        s = int(str(retry_after).strip())
+    except (TypeError, ValueError):
+        s = 0
+    base = min(s, BUSY_MAX_SECONDS) if s > 0 else 1
+    return base / 2 + random.random() * base
 
 
 _INITIAL_BACKOFF = 1.0
@@ -242,11 +257,13 @@ async def _sse_error_body(reader, headers, timeout):
         return None
 
 
-async def _open_sse(endpoint, token, last_event_id=None, timeout=None):
+async def _open_sse(endpoint, token, last_event_id=None, timeout=None,
+                    stream=None):
     """Open the SSE GET, parse status+headers, leave the reader positioned
     at the frame stream. Dedicated connection (not pooled) — SSE blocks
     by design and never returns to the pool."""
-    u = urllib.parse.urlsplit(endpoint + "/data/events")
+    query = f"?stream={urllib.parse.quote(stream)}" if stream else ""
+    u = urllib.parse.urlsplit(endpoint + "/data/events" + query)
     scheme = u.scheme or "http"
     port = u.port or (443 if scheme == "https" else 80)
     ssl_ctx = ssl.create_default_context() if scheme == "https" else None
@@ -561,14 +578,19 @@ class AsyncWatchHandle:
     on one handle do NOT compete for the same event."""
 
     def __init__(self, client, interest, *, backpressure="coalesce",
-                 buffer_size=100):
+                 buffer_size=100, backfill=False, backfill_limit=1000):
         self._client = client
         self._interest = normalize_interest(interest)
+        self._backfill_limit = backfill_limit if backfill else None
+        self._last_ts = None
+        self._replaying = None
+        self._replay_task = None
         self._opts = {"mode": backpressure, "size": buffer_size}
         self._sinks: set = set()      # every open consumer's buffer
         self._muted: dict = {}        # request-id -> monotonic expiry
         self._registered = False
         self._closed = False
+        self._terminal = None
         self._subscribed = asyncio.Event()
         # a default sink so `async for ev in handle` works without an
         # explicit events() call, and internal composition (QueryWatch,
@@ -579,6 +601,8 @@ class AsyncWatchHandle:
         buf = _AsyncCoalesceBuffer(mode=self._opts["mode"],
                                    size=self._opts["size"])
         if self._closed:
+            if self._terminal is not None:
+                buf.push(self._terminal)
             buf.close()
         else:
             self._sinks.add(buf)
@@ -644,17 +668,63 @@ class AsyncWatchHandle:
             self._muted[request_id] = time.monotonic() + ttl
 
     def _push(self, ev):
+        if self._replaying is not None and not ev.get("fromBackfill"):
+            self._replaying.append(ev)
+            return
+        if (ev.get("type") == "connection/resumed" and self._backfill_limit
+                and self._last_ts and self._interest.get("records")):
+            self._replaying = []
+            self._replay_task = asyncio.ensure_future(self._replay_gap(ev))
+            return
         rid = ev.get("request")
         if rid and rid in self._muted:
             expiry = self._muted.pop(rid)
             if time.monotonic() < expiry:
                 return                                # swallow one echo
+        ts = ev.get("ts")
+        if ts and (self._last_ts is None or ts > self._last_ts):
+            self._last_ts = ts
         for buf in list(self._sinks):
             buf.push(ev)
+
+    async def _replay_gap(self, sentinel):
+        """Push the record events missed since the last one seen, from /history, then the sentinel, then the events held meanwhile."""
+        try:
+            since = self._last_ts
+            between = [since, now_iso()]
+            records = list(self._interest["records"])
+            rows = []
+            for i in range(0, len(records), 8):
+                pages = await asyncio.gather(*(
+                    self._client.history.events(
+                        between=between, track="entity", record_xid=x,
+                        limit=self._backfill_limit)
+                    for x in records[i:i + 8]), return_exceptions=True)
+                for page in pages:
+                    if isinstance(page, list):
+                        rows.extend(page)
+            resolver = self._client._mux.resolver
+            for ev in fold_history_events(rows, set(records), since):
+                if _op_match(self._interest.get("ops"), ev["type"]):
+                    if ev.get("after") and resolver:
+                        ev["after"] = {resolver.attr_name(k): v
+                                       for k, v in ev["after"].items()}
+                    self._push(ev)
+        except Exception:
+            pass
+        held, self._replaying = self._replaying, None
+        if self._closed:
+            return
+        for buf in list(self._sinks):
+            buf.push(sentinel)
+        for ev in held:
+            self._push(ev)
 
     def _end(self):
         self._closed = True
         self._subscribed.set()
+        if self._replay_task is not None and not self._replay_task.done():
+            self._replay_task.cancel()
         for buf in list(self._sinks):
             buf.close()
 
@@ -701,6 +771,10 @@ class AsyncWatchMultiplexer:
     Contract (port of sdk/js watch.js / sdk/go watch.go):
       - The FIRST subscription flush is deferred until the SSE opens —
         POSTing earlier races the server's stream creation.
+      - Every connection mints a fresh stream id; every POST names the
+        open stream, never a closed one: with no stream nothing is posted
+        (the next open posts the union), and STREAM_NOT_FOUND is not a
+        rejection.
       - Every reconnect re-flushes (last-union cleared so the dedup cannot
         skip the re-POST) and fans out {"type": "connection/resumed"}.
       - runtime-model events refresh the schema resolver and fan out
@@ -723,10 +797,13 @@ class AsyncWatchMultiplexer:
         self._flush_pending = None
         self._flush_dirty = False
         self._last_union = None
+        self._stream_id = None
         self.resolver = AsyncSchemaResolver(client) if schema else None
 
     def _ensure_task(self):
-        if self._task is None:
+        if self._task is None or self._task.done():
+            if self._task is not None and not self._task.cancelled():
+                self._task.exception()
             try:
                 self._task = asyncio.ensure_future(self._run())
             except RuntimeError:
@@ -758,10 +835,14 @@ class AsyncWatchMultiplexer:
         died silently and every watch went deaf forever."""
         sentinel = {"type": "subscription/rejected", "reason": str(exc),
                     "error": exc, "records": []}
-        for h in list(self._watches):
-            h._push(sentinel)
+        watches, self._watches = self._watches, set()
+        schema_watches, self._schema_watches = self._schema_watches, set()
+        for h in watches:
+            h._terminal = sentinel
+            for buf in list(h._sinks):
+                buf.push(sentinel)       # past _push: a running replay would hold it and _end drops it
             h._end()
-        for sw in list(self._schema_watches):
+        for sw in schema_watches:
             sw._end()
 
     def _fan_out_sentinel(self, sentinel):
@@ -776,10 +857,11 @@ class AsyncWatchMultiplexer:
         while True:
             try:
                 token = await self._client._token()
+                stream = generate_stream_id()
                 try:
                     reader, writer = await _open_sse(
                         self._client._endpoint, token, last_event_id,
-                        self._client._timeout)
+                        self._client._timeout, stream)
                 except SynthigyError as e:
                     # Same clear+retry-once contract as the request leg: a
                     # cached token may have been rotated server-side. Only
@@ -793,6 +875,7 @@ class AsyncWatchMultiplexer:
                     raise
                 auth_retried = False
                 try:
+                    self._stream_id = stream
                     self._opened.set()
                     # First flush is deferred until here (the SSE open) —
                     # POSTing earlier races the server's stream creation.
@@ -834,6 +917,7 @@ class AsyncWatchMultiplexer:
                 finally:
                     writer.close()
                     self._opened.clear()
+                    self._stream_id = None
             except SynthigyError as e:
                 if e.code in ("UNAUTHORIZED", "FORBIDDEN") or e.status == 403:
                     self._fatal(e)
@@ -857,16 +941,18 @@ class AsyncWatchMultiplexer:
 
     async def _flush(self):
         """POST the union of every open watch's interest (full set-replace
-        via client.set_subscriptions, which also keeps the client's local
+        via client._set_subscriptions, which also keeps the client's local
         subscription mirror coherent). Signature-deduped so an unchanged
         union never re-POSTs."""
         async with self._flush_lock:
             watches = list(self._watches)
+            posted = True
             try:
-                await self._post_union(watches)
+                posted = await self._post_union(watches)
             finally:
-                for h in watches:
-                    h._subscribed.set()
+                if posted is not False:
+                    for h in watches:
+                        h._subscribed.set()
 
     async def _post_union(self, watches):
         schema_sinks = bool(self._schema_watches)
@@ -877,19 +963,21 @@ class AsyncWatchMultiplexer:
                      if (self._want_schema and schema_sinks) else [])
         else:
             records, entities, relations, ops = set(), set(), set(), set()
-            any_ops = False
+            any_ops = all_ops = False
             for h in watches:
                 interest = h.interest
                 records.update(interest.get("records") or [])
                 entities.update(interest.get("entities") or [])
                 relations.update(interest.get("relations") or [])
-                if interest.get("ops"):
+                if interest.get("records") and not interest.get("ops"):
+                    all_ops = True
+                if interest.get("records") and interest.get("ops"):
                     any_ops = True
                     ops.update(interest["ops"])
             items = []
             if records:
                 item = {"type": "data", "records": sorted(records)}
-                if any_ops:
+                if any_ops and not all_ops:
                     item["operations"] = sorted(ops)
                 items.append(item)
             if entities:
@@ -899,16 +987,25 @@ class AsyncWatchMultiplexer:
                               "relations": sorted(relations)})
             if self._want_schema:
                 items.append({"type": "runtime-model"})
+        stream = self._stream_id
+        if not stream:
+            return False                 # the next open posts the union
         sig = json.dumps(items)
         if sig == self._last_union:
-            return
-        await self._client.set_subscriptions(items)
-        # Record the signature only AFTER the POST succeeds. Recording
-        # it first (thread-mux ordering) let a cancellation between the
-        # two leave the server's set stale while the dedup skipped
-        # every retry of the same union — threads can't be cancelled
-        # mid-function, coroutines can.
+            return None
+        try:
+            await self._client._set_subscriptions(items, stream=stream)
+        except SynthigyError as e:
+            if e.code != "STREAM_NOT_FOUND":
+                raise
+            if self._stream_id == stream:
+                self._stream_id = None
+            return False
+        # record only after the POST: a cancelled POST would leave the dedup skipping every retry
+        if self._stream_id != stream:
+            return False                 # that stream's set is gone; the next open re-posts
         self._last_union = sig
+        return True
 
     async def register(self, handle):
         self._ensure_task()
@@ -1070,8 +1167,10 @@ class AsyncQueryWatch:
                 return self._pending.pop(0)
             trigger = await self._handle.__anext__()  # StopAsyncIteration ends us
             t = trigger.get("type")
-            if t in ("subscription/rejected", "paused", "connection/resumed",
-                     "schema/changed"):
+            if t == "connection/resumed":
+                self._pending.extend(await self._do_refresh(None))
+                return trigger
+            if t in ("subscription/rejected", "paused", "schema/changed"):
                 return trigger                        # sentinels pass through
             # Coalesce the burst: a write fanning out several events should
             # cost ONE refetch.
@@ -1187,6 +1286,7 @@ class AsyncSqlTemplateWatch:
                 "from", "INVALID_INTEREST")
         self._value = None
         self._handle = None
+        self._pending = []
 
     async def __aenter__(self):
         await self.ready()
@@ -1194,6 +1294,15 @@ class AsyncSqlTemplateWatch:
 
     async def __aexit__(self, *exc):
         await self.close()
+
+    async def _rerun(self, trigger):
+        before = self._value
+        after = await self._fetch()
+        self._value = after
+        if after != before:
+            return dict({"type": "result/changed", "before": before,
+                         "after": after}, **_prov(trigger))
+        return None
 
     async def _fetch(self):
         return await self._client._sql_template(self._template, self._params,
@@ -1228,17 +1337,20 @@ class AsyncSqlTemplateWatch:
         # the re-run actually differs — a touch that doesn't move this
         # template's result is silently swallowed, not forwarded.
         while True:
+            if self._pending:
+                return self._pending.pop(0)
             ev = await self._handle.__anext__()
             t = ev.get("type")
-            if t in ("subscription/rejected", "paused", "connection/resumed",
-                     "schema/changed"):
+            if t == "connection/resumed":
+                changed = await self._rerun(None)
+                if changed:
+                    self._pending.append(changed)
                 return ev
-            before = self._value
-            after = await self._fetch()
-            self._value = after
-            if after != before:
-                return dict({"type": "result/changed", "before": before,
-                             "after": after}, **_prov(ev))
+            if t in ("subscription/rejected", "paused", "schema/changed"):
+                return ev
+            changed = await self._rerun(ev)
+            if changed:
+                return changed
 
     async def close(self):
         if self._handle is not None:
@@ -1418,7 +1530,7 @@ def resolve_endpoint(endpoint=None):
 class AsyncClient:
     """Async-native Synthigy client — the engine. Reads, XSQL,
     sql-template, writes, batch, trees, history, schema/lint, raw
-    listen/observe streaming, subscriptions, and the full watch family,
+    listen streaming, subscription status, and the full watch family,
     all with acting_as identity multiplexing (client default, per-call
     override).
 
@@ -1508,8 +1620,7 @@ class AsyncClient:
             raise no_token_error()
 
         # Local mirror of the server subscription set (full set-replace
-        # wire) — shared by the raw subscriptions API, observe() and the
-        # watch multiplexer's union flush.
+        # wire), written by the watch multiplexer's union flush.
         self._data_subs = {}       # key -> {"records": set, "operations": set?}
         self._model_subs = set()   # "deployed-model" | "runtime-model"
         self._entity_subs = set()
@@ -1569,12 +1680,28 @@ class AsyncClient:
                                 status=401)
         return status, resp_headers, data
 
-    async def _post(self, body):
-        """POST to /data; maps 403 / non-2xx to SynthigyError; returns
-        parsed JSON with _request_id attached."""
+    async def _post(self, body, timeout=None):
+        """POST to /data; maps 403 / non-2xx to SynthigyError, resends a
+        SERVER_BUSY refusal within `timeout` (else the client's); returns parsed JSON with _request_id attached."""
+        payload = json.dumps(body).encode()
+        started = time.monotonic()
+        limit = timeout or self._timeout
+        for attempt in range(1, BUSY_ATTEMPTS + 1):
+            try:
+                left = DEFAULT_TIMEOUT if timeout or not limit else limit - (time.monotonic() - started)
+                return await self._post_once(payload, left)
+            except SynthigyError as e:
+                if attempt >= BUSY_ATTEMPTS or e.code != "SERVER_BUSY":
+                    raise
+                wait = busy_delay(getattr(e, "retry_after", None))
+                if limit and time.monotonic() - started + wait >= limit:
+                    raise
+                await asyncio.sleep(wait)
+
+    async def _post_once(self, payload, timeout=DEFAULT_TIMEOUT):
         status, resp_headers, data = await self._authed(
-            "POST", "/data", body=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"})
+            "POST", "/data", body=payload,
+            headers={"Content-Type": "application/json"}, timeout=timeout)
         request_id = resp_headers.get("x-request-id")
         try:
             parsed = json.loads(data) if data else None
@@ -1588,7 +1715,9 @@ class AsyncClient:
         if not 200 <= status < 300:
             err = parsed.get("error") if isinstance(parsed, dict) else None
             if err:
-                raise error_from_server(err, status, request_id)
+                e = error_from_server(err, status, request_id)
+                e.retry_after = resp_headers.get("retry-after")
+                raise e
             raise SynthigyError(f"Request failed ({status})", "HTTP_ERROR",
                                 data.decode(errors="replace"),
                                 request_id=request_id, status=status)
@@ -1612,7 +1741,7 @@ class AsyncClient:
         kf = key_format if key_format is not None else self._default_key_format
         if kf:
             body["key_format"] = kf
-        coro = self._post(body)
+        coro = self._post(body, timeout)
         try:
             resp = await (asyncio.wait_for(coro, timeout) if timeout else coro)
         except asyncio.TimeoutError:
@@ -1897,10 +2026,7 @@ class AsyncClient:
             self._login = AsyncLoginAPI(self)
         return self._login
 
-    # ── subscriptions (advanced — prefer the watch family) ─────────────
-    # Raw calls here clobber a live watch multiplexer's union: the mux
-    # flushes THROUGH set_subscriptions, and the server set is a full
-    # replace every time.
+    # ── subscriptions (internal: the watch multiplexer is the only caller) ─
 
     def _build_subscriptions_body(self):
         items = []
@@ -1918,8 +2044,10 @@ class AsyncClient:
             items.append({"type": t})
         return {"subscriptions": items}
 
-    async def _flush_subscriptions(self):
+    async def _flush_subscriptions(self, stream=None):
         body = self._build_subscriptions_body()
+        if stream:
+            body["stream"] = stream
         status, _h, data = await self._authed(
             "POST", "/data/subscription/set",
             body=json.dumps(body).encode(),
@@ -1934,20 +2062,14 @@ class AsyncClient:
                                      "code": "HTTP_ERROR", **err}, status)
         return parsed
 
-    async def _flush_subscriptions_safe(self):
-        try:
-            await self._flush_subscriptions()
-        except SynthigyError:
-            pass
-
-    async def subscribe(self, descriptor, *, key=None):
+    async def _subscribe(self, descriptor, *, key=None):
         """Add a record descriptor to the set and POST the full set."""
         normalized = normalize_descriptor(descriptor)
         key = key or descriptor_key(normalized)
         self._data_subs[key] = normalized
         return await self._flush_subscriptions()
 
-    async def unsubscribe(self, handle):
+    async def _unsubscribe(self, handle):
         """Remove by subscribe-time key or an equal-by-hash descriptor."""
         key = None
         if isinstance(handle, str):
@@ -1963,19 +2085,19 @@ class AsyncClient:
             return {"ok": True}
         return await self._flush_subscriptions()
 
-    async def subscribe_model(self, *, raw=False):
+    async def _subscribe_model(self, *, raw=False):
         self._model_subs.add("deployed-model" if raw else "runtime-model")
         return await self._flush_subscriptions()
 
-    async def unsubscribe_model(self, *, raw=False):
+    async def _unsubscribe_model(self, *, raw=False):
         t = "deployed-model" if raw else "runtime-model"
         if t not in self._model_subs:
             return {"ok": True}
         self._model_subs.discard(t)
         return await self._flush_subscriptions()
 
-    async def set_subscriptions(self, items):
-        """Full replace of the local mirror + server set in one call."""
+    async def _set_subscriptions(self, items, *, stream=None):
+        """Full replace of the local mirror + server set (of `stream` when given) in one call."""
         self._data_subs.clear()
         self._model_subs.clear()
         self._entity_subs.clear()
@@ -2006,9 +2128,9 @@ class AsyncClient:
             else:
                 raise SynthigyError(f"Unsupported subscription type: {t}",
                                     "UNSUPPORTED_TYPE")
-        return await self._flush_subscriptions()
+        return await self._flush_subscriptions(stream)
 
-    async def clear_subscriptions(self):
+    async def _clear_subscriptions(self):
         self._data_subs.clear()
         self._model_subs.clear()
         self._entity_subs.clear()
@@ -2016,8 +2138,11 @@ class AsyncClient:
         return await self._flush_subscriptions()
 
     async def subscriptions(self):
-        """Current server-side subscription status (GET, not the mirror)."""
-        status, _h, data = await self._authed("GET", "/data/subscription/status")
+        """Current server-side subscription status of the watch stream, else of the client."""
+        stream = self._mux._stream_id
+        path = "/data/subscription/status" + (
+            f"?stream={urllib.parse.quote(stream)}" if stream else "")
+        status, _h, data = await self._authed("GET", path)
         try:
             parsed = json.loads(data) if data else {}
         except ValueError:
@@ -2033,19 +2158,23 @@ class AsyncClient:
     async def listen(self):
         """Infinite reconnect loop over the raw SSE channel. Yields the
         channel envelope verbatim; the open sentinel surfaces as
-        {"type": "sse/open"}. Backoff 1s doubling to 30s, reset on any
-        frame; Last-Event-ID resume across reconnects. UNAUTHORIZED /
-        FORBIDDEN are fatal and raise (single 401 gets one clear+retry)."""
+        {"type": "sse/open", "stream": <id>}, a fresh stream id per
+        connection. Backoff 1s doubling to 30s, reset on any frame;
+        Last-Event-ID resume across reconnects. UNAUTHORIZED / FORBIDDEN
+        are fatal and raise (single 401 gets one clear+retry). It yields
+        only what the client's subscription set selects; declare that
+        interest with watch()."""
         delay = _INITIAL_BACKOFF
         last_event_id = None
         auth_retried = False
         while True:
             try:
                 token = await self._token()
+                stream = generate_stream_id()
                 try:
                     reader, writer = await _open_sse(self._endpoint, token,
                                                      last_event_id,
-                                                     self._timeout)
+                                                     self._timeout, stream)
                 except SynthigyError as e:
                     if (e.code == "UNAUTHORIZED" and self._token_manager
                             and not auth_retried):
@@ -2055,7 +2184,7 @@ class AsyncClient:
                     raise
                 auth_retried = False
                 try:
-                    yield {"type": "sse/open"}
+                    yield {"type": "sse/open", "stream": stream}
                     async for frame in _sse_frames(reader):
                         if frame.get("_sse_id"):
                             last_event_id = frame["_sse_id"]
@@ -2072,82 +2201,19 @@ class AsyncClient:
             await asyncio.sleep(delay)
             delay = min(delay * 2, _MAX_BACKOFF)
 
-    async def observe(self, descriptor, *, key=None, backfill=False,
-                      backfill_limit=1000):
-        """One-call live primitive: subscribe + SSE + reconnect (+ optional
-        /history backfill across gaps). The server tears down subscription
-        state on SSE close, so the descriptor is re-registered before each
-        session. Closing the generator unsubscribes the descriptor."""
-        normalized = normalize_descriptor(descriptor)
-        key = key or descriptor_key(normalized)
-        last_seen_ts = None
-        delay = _INITIAL_BACKOFF
-        try:
-            while True:
-                try:
-                    self._data_subs[key] = normalized
-                    await self._flush_subscriptions()
-                    token = await self._token()
-                    reader, writer = await _open_sse(self._endpoint, token,
-                                                     None, self._timeout)
-                    try:
-                        async for frame in _sse_frames(reader):
-                            payload = {k: v for k, v in frame.items()
-                                       if k not in ("_sse_event", "_sse_id")}
-                            t = payload.get("type")
-                            # only slash-typed channel events; skip heartbeats
-                            if not isinstance(t, str) or "/" not in t:
-                                continue
-                            # defense-in-depth: parallel observers on one
-                            # client must not cross-deliver
-                            if not _event_matches_descriptor(payload, normalized):
-                                continue
-                            if payload.get("ts"):
-                                last_seen_ts = payload["ts"]
-                            delay = _INITIAL_BACKOFF
-                            yield payload
-                    finally:
-                        writer.close()
-                except SynthigyError as e:
-                    if e.code in ("UNAUTHORIZED", "FORBIDDEN") or e.status == 403:
-                        raise
-
-                if backfill and last_seen_ts:
-                    try:
-                        events = await self.history.events(
-                            between=[last_seen_ts, now_iso()],
-                            track="entity", limit=backfill_limit)
-                        for folded in fold_history_events(
-                                events, normalized["records"]):
-                            if folded.get("ts"):
-                                last_seen_ts = folded["ts"]
-                            yield folded
-                    except SynthigyError:
-                        pass  # best-effort by contract
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, _MAX_BACKOFF)
-        finally:
-            # Runs on aclose() OR cancellation. The mirror pop is
-            # unconditional (no awaits); the unsubscribe POST is a detached
-            # task we TRY to await — from a live aclose() that makes the
-            # cleanup deterministic, from a cancelled scope the await
-            # raises immediately but the detached task still completes.
-            if self._data_subs.pop(key, None) is not None:
-                flush = asyncio.ensure_future(self._flush_subscriptions_safe())
-                try:
-                    await flush
-                except (asyncio.CancelledError, Exception):
-                    pass
-
     # ── watch factories ────────────────────────────────────────────────
 
-    def watch(self, interest, *, backpressure="coalesce", buffer_size=100):
+    def watch(self, interest, *, backpressure="coalesce", buffer_size=100,
+              backfill=False, backfill_limit=1000):
         """Raw live subscription: `async with client.watch({...}) as w:
         async for ev in w`. interest = {records?, entities?, relations?,
         relation_xids?, ops?}. Live interest via w.add/remove/set_interest;
-        w.mute_request suppresses echoes."""
+        w.mute_request suppresses echoes. backfill=True replays the record
+        events missed during a reconnect from /history (fromBackfill=True)
+        before connection/resumed."""
         return AsyncWatchHandle(self, interest, backpressure=backpressure,
-                                buffer_size=buffer_size)
+                                buffer_size=buffer_size, backfill=backfill,
+                                backfill_limit=backfill_limit)
 
     def watch_schema(self):
         """Stream of {"type": "schema/changed"} deploy events."""

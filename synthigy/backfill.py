@@ -1,30 +1,22 @@
-"""Observe-gap backfill — fold /history event rows into observe events.
-
-History rows are attribute-primary (one row per changed attribute) and
-key by attribute-XID; live events are attribute-NAME keyed. Backfill
-events are left xid-keyed and flagged from_backfill=True so consumers
-can tell them apart. Best-effort by contract.
-"""
+"""Watch backfill: fold /history event rows into record events."""
 
 
-def fold_history_events(events, records):
-    """events: /history 'events' rows; records: watched xid set.
-    Returns folded observe-shaped events, one per (record, op)."""
+def fold_history_events(events, records, since=None):
+    """Fold attribute-level /history rows into one record event per (record, op) after `since`, marked fromBackfill."""
     by_key = {}
-    order = []
     for ev in events or []:
         xid = ev.get("recordXid") or ev.get("record-xid")
-        if not xid or xid not in records:
+        ts = ev.get("ts")
+        if not xid or xid not in records or not ts or (since and not ts > since):
             continue
         op = ev.get("op")
-        fold_key = f"{xid}::{op}"
         channel_type = f"record/{'update' if op == 'change' else op}"
-        folded = by_key.get(fold_key)
+        folded = by_key.get((xid, channel_type))
         if folded is None:
             folded = {
                 "type": channel_type,
-                "ts": ev.get("ts"),
-                "record-xid": xid,
+                "record": xid,
+                "ts": ts,
                 "txid": ev.get("txid"),
                 "actor": ev.get("actorXid") or ev.get("actor-xid"),
                 "request": ev.get("requestId") or ev.get("request-id"),
@@ -32,14 +24,14 @@ def fold_history_events(events, records):
                 "after": {},
                 "fromBackfill": True,
             }
-            by_key[fold_key] = folded
-            order.append(folded)
+            by_key[(xid, channel_type)] = folded
         attr_xid = ev.get("attributeXid") or ev.get("attribute-xid")
         if attr_xid and attr_xid != "__delete__":
             folded["after"][attr_xid] = ev.get("value")
-        if (ev.get("ts") or "") > (folded.get("ts") or ""):
-            folded["ts"] = ev["ts"]
-    for folded in order:
+        if ts > folded["ts"]:
+            folded["ts"] = ts
+    out = sorted(by_key.values(), key=lambda e: e["ts"])
+    for folded in out:
         if folded["type"] == "record/delete":
             folded.pop("after", None)
-    return order
+    return out

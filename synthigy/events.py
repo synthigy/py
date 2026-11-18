@@ -222,7 +222,7 @@ def _union_changed(a, b):
 
 
 # ---------------------------------------------------------------------------
-# Subscription descriptors (observe / raw subscription set)
+# Subscription descriptors (raw subscription set)
 # ---------------------------------------------------------------------------
 
 
@@ -264,21 +264,6 @@ def descriptor_key(descriptor):
         "operations": sorted(descriptor["operations"])
         if "operations" in descriptor else None,
     })
-
-
-def _event_matches_descriptor(event, descriptor):
-    """Record events match by record-xid; relation events by data[0]
-    (server rotates so position 0 is the subscribed perspective)."""
-    records = descriptor.get("records")
-    if not records:
-        return False
-    record_xid = event.get("record-xid")
-    if record_xid:
-        return record_xid in records
-    data = event.get("data")
-    if isinstance(data, list) and len(data) >= 2:
-        return data[0] in records
-    return False
 
 
 # ---------------------------------------------------------------------------

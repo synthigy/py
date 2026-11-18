@@ -115,8 +115,8 @@ class Client:
 
     def _iter(self, agen):
         """Bridge an async generator into a blocking one. Closing the
-        blocking generator runs aclose() on the loop, so cleanup (e.g.
-        observe()'s unsubscribe POST) is deterministic."""
+        blocking generator runs aclose() on the loop, so the async
+        generator's cleanup is deterministic."""
         try:
             while True:
                 try:
@@ -248,25 +248,7 @@ class Client:
             self._login_api = LoginAPI(self)
         return self._login_api
 
-    # ── subscriptions (advanced — prefer the watch family) ─────────────
-
-    def subscribe(self, *a, **kw):
-        return self._call("subscribe", *a, **kw)
-
-    def unsubscribe(self, *a, **kw):
-        return self._call("unsubscribe", *a, **kw)
-
-    def subscribe_model(self, **kw):
-        return self._call("subscribe_model", **kw)
-
-    def unsubscribe_model(self, **kw):
-        return self._call("unsubscribe_model", **kw)
-
-    def set_subscriptions(self, items):
-        return self._call("set_subscriptions", items)
-
-    def clear_subscriptions(self):
-        return self._call("clear_subscriptions")
+    # ── subscriptions ──────────────────────────────────────────────────
 
     def subscriptions(self):
         return self._call("subscriptions")
@@ -277,12 +259,6 @@ class Client:
         """Blocking generator over raw SSE envelopes (see engine listen())."""
         c = self._ensure_started()
         return self._iter(c.listen())
-
-    def observe(self, descriptor, **kw):
-        """Blocking generator over the one-call live primitive. Closing the
-        generator unsubscribes the descriptor."""
-        c = self._ensure_started()
-        return self._iter(c.observe(descriptor, **kw))
 
     # ── live data (watch layer) ────────────────────────────────────────
 

@@ -1,8 +1,9 @@
-"""Subscription set-replace bodies, SSE listen/observe, backfill fold —
+"""Subscription set-replace bodies, SSE listen, backfill fold —
 exercised through the blocking facade Client. Stub-server based, mirrors
 the JS client.test.js coverage."""
 
 import json
+import re
 import unittest
 
 import synthigy.async_client
@@ -65,12 +66,12 @@ class TestSubscriptions(SseTestCase):
         self.srv.route("/data/subscription/set", (200, {"ok": True}))
 
     def test_subscribe_body_sorted_records(self):
-        self.client().subscribe(["b-2", "a-1"])
+        self.client()._call("_subscribe", ["b-2", "a-1"])
         self.assertEqual(self.set_bodies()[-1], {"subscriptions": [
             {"type": "data", "records": ["a-1", "b-2"]}]})
 
     def test_operations_sorted(self):
-        self.client().subscribe({"records": ["x"],
+        self.client()._call("_subscribe", {"records": ["x"],
                                  "operations": ["update", "insert"]})
         self.assertEqual(self.set_bodies()[-1]["subscriptions"][0],
                          {"type": "data", "records": ["x"],
@@ -78,32 +79,32 @@ class TestSubscriptions(SseTestCase):
 
     def test_full_replace_every_time(self):
         c = self.client()
-        c.subscribe(["a"])
-        c.subscribe(["b"])
+        c._call("_subscribe", ["a"])
+        c._call("_subscribe", ["b"])
         body = self.set_bodies()[-1]
         self.assertEqual(len(body["subscriptions"]), 2)  # whole set re-sent
 
     def test_rejects_legacy_entity_string(self):
         with self.assertRaises(SynthigyError) as cm:
-            self.client().subscribe("User")
+            self.client()._call("_subscribe", "User")
         self.assertEqual(cm.exception.code, "INVALID_SUBSCRIPTION")
 
     def test_rejects_empty_records(self):
         with self.assertRaises(SynthigyError) as cm:
-            self.client().subscribe([])
+            self.client()._call("_subscribe", [])
         self.assertEqual(cm.exception.code, "EMPTY_RECORDS")
 
     def test_unsubscribe_by_descriptor_and_unknown_noop(self):
         c = self.client()
-        c.subscribe(["a", "b"])
-        c.unsubscribe(["b", "a"])  # equal-by-hash regardless of order
+        c._call("_subscribe", ["a", "b"])
+        c._call("_unsubscribe", ["b", "a"])  # equal-by-hash regardless of order
         self.assertEqual(self.set_bodies()[-1], {"subscriptions": []})
         n = len(self.set_bodies())
-        self.assertEqual(c.unsubscribe(["zzz"]), {"ok": True})
+        self.assertEqual(c._call("_unsubscribe", ["zzz"]), {"ok": True})
         self.assertEqual(len(self.set_bodies()), n)  # no extra POST
 
     def test_set_subscriptions_mixed_tracks(self):
-        self.client().set_subscriptions([
+        self.client()._call("_set_subscriptions", [
             {"type": "data", "records": ["r-1"]},
             {"type": "entity", "entities": ["movie", "author"]},
             {"type": "relation", "relations": ["Movie.actors"]},
@@ -119,25 +120,25 @@ class TestSubscriptions(SseTestCase):
 
     def test_set_subscriptions_unknown_type(self):
         with self.assertRaises(SynthigyError) as cm:
-            self.client().set_subscriptions([{"type": "firehose"}])
+            self.client()._call("_set_subscriptions", [{"type": "firehose"}])
         self.assertEqual(cm.exception.code, "UNSUPPORTED_TYPE")
 
     def test_model_subscribe_variants(self):
         c = self.client()
-        c.subscribe_model()
+        c._call("_subscribe_model")
         self.assertEqual(self.set_bodies()[-1]["subscriptions"],
                          [{"type": "runtime-model"}])
-        c.subscribe_model(raw=True)
+        c._call("_subscribe_model", raw=True)
         types = {i["type"] for i in self.set_bodies()[-1]["subscriptions"]}
         self.assertEqual(types, {"runtime-model", "deployed-model"})
-        c.unsubscribe_model()
+        c._call("_unsubscribe_model")
         self.assertEqual(self.set_bodies()[-1]["subscriptions"],
                          [{"type": "deployed-model"}])
 
     def test_clear(self):
         c = self.client()
-        c.subscribe(["a"])
-        c.clear_subscriptions()
+        c._call("_subscribe", ["a"])
+        c._call("_clear_subscriptions")
         self.assertEqual(self.set_bodies()[-1], {"subscriptions": []})
 
     def test_status_get(self):
@@ -147,6 +148,15 @@ class TestSubscriptions(SseTestCase):
         self.assertEqual(out["subscriptions"], [{"type": "data"}])
         req = self.srv.requests_to("/data/subscription/status")[-1]
         self.assertEqual(req["method"], "GET")
+        self.assertEqual(req["path"], "/data/subscription/status")
+
+    def test_status_names_the_watch_stream(self):
+        self.srv.route("/data/subscription/status", (200, {"subscriptions": []}))
+        c = self.client()
+        c._on_loop(setattr, c._ensure_started()._mux, "_stream_id", "s-abc12345")
+        c.subscriptions()
+        self.assertEqual(self.srv.requests_to("/data/subscription/status")[-1]["path"],
+                         "/data/subscription/status?stream=s-abc12345")
 
 
 class TestListen(SseTestCase):
@@ -159,8 +169,22 @@ class TestListen(SseTestCase):
             got.append(frame)
             if len(got) == 2:
                 break
-        self.assertEqual(got[0], {"type": "sse/open"})
+        self.assertEqual(got[0]["type"], "sse/open")
         self.assertEqual(got[1], ev)  # SSE metadata stripped, payload verbatim
+
+    def test_every_connection_names_a_fresh_stream(self):
+        self.srv.route("/data/events", sse_handler(
+            [data_frame({"type": "record/update", "record-xid": "u-1"})]))
+        opens = []
+        for frame in self.client().listen():
+            if frame["type"] == "sse/open":
+                opens.append(frame["stream"])
+            if len(opens) == 2:
+                break
+        paths = [r["path"] for r in self.srv.requests_to("/data/events")][:2]
+        self.assertEqual(paths, [f"/data/events?stream={s}" for s in opens])
+        self.assertNotEqual(opens[0], opens[1])
+        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{32}", s) for s in opens))
 
     def test_reconnect_carries_last_event_id(self):
         ev1 = {"type": "record/update", "record-xid": "u-1"}
@@ -218,37 +242,6 @@ class TestListen(SseTestCase):
         self.assertEqual(got[1], ev)
 
 
-class TestObserve(SseTestCase):
-    def test_filters_resubscribes_and_cleans_up(self):
-        match = {"type": "record/update", "record-xid": "u-1", "ts": "t1"}
-        other = {"type": "record/update", "record-xid": "other"}
-        heartbeat = {"type": "heartbeat"}  # not slash-typed → skipped
-        self.srv.route("/data/subscription/set", (200, {"ok": True}))
-        self.srv.route("/data/events", sse_handler(
-            [data_frame(other) + data_frame(heartbeat) + data_frame(match)]))
-        c = self.client()
-        got = []
-        for ev in c.observe(["u-1", "u-9"]):
-            got.append(ev)
-            break
-        self.assertEqual(got, [match])
-        bodies = self.set_bodies()
-        # register before the session + cleanup unsubscribe on close
-        self.assertEqual(bodies[0]["subscriptions"][0]["records"],
-                         ["u-1", "u-9"])
-        self.assertEqual(bodies[-1], {"subscriptions": []})
-
-    def test_relation_events_match_on_data0(self):
-        link = {"type": "relation/link", "data": ["u-1", "g-2"]}
-        wrong = {"type": "relation/link", "data": ["g-2", "u-1"]}
-        self.srv.route("/data/subscription/set", (200, {"ok": True}))
-        self.srv.route("/data/events",
-                       sse_handler([data_frame(wrong) + data_frame(link)]))
-        for ev in self.client().observe(["u-1"]):
-            self.assertEqual(ev, link)
-            break
-
-
 class TestBackfillFold(unittest.TestCase):
     def test_folds_per_record_op_and_filters(self):
         rows = [
@@ -264,13 +257,23 @@ class TestBackfillFold(unittest.TestCase):
         out = fold_history_events(rows, {"u-1", "u-2"})
         self.assertEqual(len(out), 2)
         upd = out[0]
-        self.assertEqual(upd["type"], "record/update")
+        self.assertEqual((upd["type"], upd["record"]), ("record/update", "u-1"))
         self.assertEqual(upd["after"], {"a-name": "A", "a-age": 30})
         self.assertEqual(upd["ts"], "t2")  # max ts wins
         self.assertTrue(upd["fromBackfill"])
         dele = out[1]
         self.assertEqual(dele["type"], "record/delete")
         self.assertNotIn("after", dele)
+
+    def test_keeps_rows_after_since_sorted_by_ts(self):
+        rows = [
+            {"record-xid": "u-2", "op": "change", "ts": "t3", "attribute-xid": "a", "value": 1},
+            {"record-xid": "u-1", "op": "change", "ts": "t1", "attribute-xid": "a", "value": 0},
+            {"record-xid": "u-1", "op": "insert", "ts": "t2", "attribute-xid": "a", "value": 2},
+        ]
+        out = fold_history_events(rows, {"u-1", "u-2"}, "t1")
+        self.assertEqual([(e["record"], e["type"], e["ts"]) for e in out],
+                         [("u-1", "record/insert", "t2"), ("u-2", "record/update", "t3")])
 
 
 if __name__ == "__main__":

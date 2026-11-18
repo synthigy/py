@@ -44,6 +44,11 @@ def generate_request_id():
     return secrets.token_urlsafe(12)
 
 
+def generate_stream_id():
+    """A fresh id for one event stream: the engine keeps its subscription set apart from the client's other streams."""
+    return secrets.token_hex(16)
+
+
 def xsql_document(source, op):
     """Ensure an XSQL operation DOCUMENT (STRICT wire: XSQL travels only as
     {op: "xsql", xsql: <document>}). Sources already starting with `@` pass

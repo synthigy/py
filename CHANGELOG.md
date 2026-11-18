@@ -3,6 +3,60 @@
 All notable changes to `synthigy` (PyPI). Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.6.0
+
+### Breaking
+- **`observe()` is gone; use `watch()`.** It opened its own event stream and posted its own subscription
+  set, and the engine keeps one set per client, so it overwrote the set every watch shared. For the same
+  loop: `for ev in client.watch({"records": records}).events()`. Its `backfill` lives on as a `watch`
+  option.
+- **`subscribe`, `unsubscribe`, `subscribe_model`, `unsubscribe_model`, `set_subscriptions` and
+  `clear_subscriptions` are internal** (on `Client`, `AsyncClient` and the module). Each replaced the
+  client's whole subscription set behind the watch multiplexer's back. Declare interest with `watch()`;
+  `subscriptions()` still shows what the engine holds.
+
+### Added
+- **Each event stream has its own subscription set** (engine 0.5.5+). Every connection gets a fresh stream id
+  (`/data/events?stream=…`, also on `listen()`'s `sse/open` as `"stream"`) and each subscription POST names it,
+  so two processes on one client id no longer overwrite each other's watches. An older engine ignores the id
+  and keeps one set per client.
+- **`watch(interest, backfill=True)`** replays the record events missed during a reconnect from `/history`
+  (asked per watched record, `backfill_limit=1000` rows each, marked `fromBackfill`), then emits
+  `connection/resumed`.
+- **A busy engine is retried for you.** `SERVER_BUSY` (HTTP 503 from an overloaded engine) is resent up to
+  3 attempts in all, waiting `Retry-After` (at most 10 s) with ±50% jitter, never past the client's `timeout`; a per-call `timeout=` covers the waits. The request never
+  ran, so this is safe for writes too. When all 3 are refused you get the error: category `rate_limit`, retryable.
+
+### Fixed
+- **`events()` opened after a refused stream gets the refusal and ends.** It used to get a fresh buffer that never
+  received the `subscription/rejected` and never closed, so the loop hung.
+- A subscription POST that returns after its event stream ended no longer marks the watches it covered
+  subscribed; the engine dropped that stream's set, so they settle on the next open's POST.
+- **Live queries re-run on `connection/resumed`**, so a dropped connection no longer leaves a `watch_query` or
+  `watch_sql_template` stale until the next change.
+- A backfilling watch holds the live events that arrive while it replays the gap and delivers them after the
+  replayed ones and `connection/resumed` (also when the replay fails), so an older replayed event can't land
+  after a newer live one.
+- A subscription POST answered `STREAM_NOT_FOUND` (its stream already closed) is no longer reported as
+  `subscription/rejected`; the next stream posts the union.
+- A watch no longer reports itself ready while no stream is open: an unchanged union during a reconnect or
+  after `STREAM_NOT_FOUND` used to mark it subscribed although nothing was posted.
+- A watch opened after a refused stream (401/403) opens a new stream; it used to wait on the dead one forever.
+- A refused stream's `subscription/rejected` reaches a watch that is replaying a backfill gap; it used to end
+  with no event.
+- Watches ended by a refused stream leave the shared subscription, so the next stream posts only the interest
+  of watches still open; replacing a refused stream no longer logs "Task exception was never retrieved".
+- **A busy resend stays within the client's `timeout`.** A `SERVER_BUSY` resend now gets only what is left of the
+  client-level `timeout`, not a fresh full one, so the whole call ends within about that timeout.
+- **A watch on every operation is no longer narrowed by another watch's op filter.** The shared subscription
+  sent the union of every watch's ops, so one watch filtered to `insert` stopped updates and deletes for watches
+  that wanted all of them. Any watch with records and no op filter now turns the filter off.
+- **45 engine error codes now carry their real category** instead of `internal`: bad shapes, `INVALID_*` and
+  missing arguments are `validation`; `REF_NOT_FOUND`, `UNKNOWN_ATTRIBUTE`, `UNKNOWN_ROLE` and `DOC_NOT_FOUND` are
+  `not_found`; `GUARD_VIOLATION`, `CONSTRAINT_VIOLATION`, `DEPENDENT_OBJECTS`, `HOOK_REFUSED`, `LOCKED` and
+  `SCHEMA_CONFLICT` are `conflict`; `DB_UNAVAILABLE` is `internal` and retryable. `DB_ERROR` stays unclassified
+  and not retryable; the engine's own `retryable` flag still wins.
+
 ## 0.5.0
 
 ### Added

@@ -151,7 +151,6 @@ def login(): return _dflt().login
 
 # Streaming
 def listen(*a, **kw): return _dflt().listen(*a, **kw)
-def observe(*a, **kw): return _dflt().observe(*a, **kw)
 
 
 # Live data (watch layer)
@@ -162,11 +161,5 @@ def watch_query_xsql(*a, **kw): return _dflt().watch_query_xsql(*a, **kw)
 def watch_sql_template(*a, **kw): return _dflt().watch_sql_template(*a, **kw)
 
 
-# Subscriptions (advanced — prefer the watch family)
-def subscribe(*a, **kw): return _dflt().subscribe(*a, **kw)
-def unsubscribe(*a, **kw): return _dflt().unsubscribe(*a, **kw)
-def subscribe_model(*a, **kw): return _dflt().subscribe_model(*a, **kw)
-def unsubscribe_model(*a, **kw): return _dflt().unsubscribe_model(*a, **kw)
-def set_subscriptions(*a, **kw): return _dflt().set_subscriptions(*a, **kw)
-def clear_subscriptions(*a, **kw): return _dflt().clear_subscriptions(*a, **kw)
+# Subscriptions
 def subscriptions(*a, **kw): return _dflt().subscriptions(*a, **kw)

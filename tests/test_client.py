@@ -8,6 +8,7 @@ import json
 import threading
 import unittest
 import unittest.mock
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import synthigy
@@ -50,6 +51,7 @@ class _Stub(BaseHTTPRequestHandler):
             "body": self._read_body(),
         }
         srv.requests.append(record)
+        self.request_body = record["body"]
         path = self.path.split("?")[0]
         script = srv.routes.get(path)
         if script is None:
@@ -278,11 +280,19 @@ class TestErrors(ClientTestCase):
         e = cm.exception
         self.assertEqual((e.code, e.category, e.retryable), ("RELATION_FORBIDDEN", "iam", False))
 
+    def test_engine_codes_have_their_category(self):
+        for code, category, retryable in [
+                ("BAD_DATA_SHAPE", "validation", False), ("REF_NOT_FOUND", "not_found", False),
+                ("GUARD_VIOLATION", "conflict", False), ("DB_UNAVAILABLE", "internal", True),
+                ("DB_ERROR", "internal", False)]:
+            e = SynthigyError("m", code)
+            self.assertEqual((e.category, e.retryable), (category, retryable), code)
+
     def test_unknown_code_retryable_only_when_server_says_so(self):
         self.assertEqual(SynthigyError("x", "SOME_FUTURE_CODE").category, "internal")
         self.assertFalse(SynthigyError("x", "SOME_FUTURE_CODE").retryable)
-        for error, retryable in (({"code": "DB_UNAVAILABLE", "retryable": True}, True),
-                                 ({"code": "DB_UNAVAILABLE"}, False)):
+        for error, retryable in (({"code": "DB_ERROR", "retryable": True}, True),
+                                 ({"code": "DB_ERROR"}, False)):
             self.srv.route("/data", (200, {"results": [{
                 "ok": False, "error": {"message": "x", **error}}]}))
             with self.assertRaises(SynthigyError) as cm:
@@ -328,6 +338,41 @@ class TestErrors(ClientTestCase):
             self.static_client().search("User", None, None)
         self.assertEqual(cm.exception.code, "TIMEOUT")
         self.assertEqual(cm.exception.category, "rate_limit")
+
+    BUSY = (503, {"error": {"message": "busy", "code": "SERVER_BUSY", "retryable": True}},
+            {"Retry-After": "1"})
+
+    def test_server_busy_is_resent_until_it_gets_in(self):
+        self.srv.route("/data", self.BUSY, self.BUSY,
+                       (200, {"results": [{"ok": True, "data": []}]}))
+        with mock.patch("synthigy.async_client.busy_delay", return_value=0):
+            self.assertEqual(self.static_client().search("User", None, None), [])
+        self.assertEqual(len(self.srv.requests_to("/data")), 3)
+
+    def test_server_busy_gives_up_after_three_attempts(self):
+        self.srv.route("/data", self.BUSY)
+        with mock.patch("synthigy.async_client.busy_delay", return_value=0) as delay:
+            with self.assertRaises(SynthigyError) as cm:
+                self.static_client().search("User", None, None)
+        e = cm.exception
+        self.assertEqual((e.code, e.category, e.retryable, e.status),
+                         ("SERVER_BUSY", "rate_limit", True, 503))
+        self.assertEqual(len(self.srv.requests_to("/data")), 3)
+        self.assertEqual(delay.call_args.args, ("1",))
+
+    def test_other_refusals_are_not_resent(self):
+        self.srv.route("/data", (503, {"error": {"message": "no", "code": "MODULE_NOT_LOADED"}}))
+        with mock.patch("synthigy.async_client.busy_delay", return_value=0):
+            with self.assertRaises(SynthigyError):
+                self.static_client().search("User", None, None)
+        self.assertEqual(len(self.srv.requests_to("/data")), 1)
+
+    def test_busy_delay_follows_retry_after(self):
+        from synthigy.async_client import busy_delay
+        for _ in range(200):
+            self.assertTrue(1 <= busy_delay("2") < 3)
+            self.assertTrue(0.5 <= busy_delay(None) < 1.5)
+            self.assertTrue(5 <= busy_delay("3600") < 15)
 
     def test_xsql_parse_error_position_fields(self):
         self.srv.route("/data", (200, {"results": [{
@@ -564,7 +609,7 @@ class TestIntrospection(ClientTestCase):
         c = self.static_client()
         for name, call in (("compile", lambda: c.compile("movie (\n")),
                            ("history", lambda: c.history.events()),
-                           ("subscribe", lambda: c.subscribe(["m-1"])),
+                           ("subscribe", lambda: c._call("_subscribe", ["m-1"])),
                            ("subscriptions", lambda: c.subscriptions())):
             with self.assertRaises(SynthigyError) as cm:
                 call()
@@ -613,7 +658,7 @@ class TestIntrospection(ClientTestCase):
         self.assertEqual((cm.exception.code, cm.exception.message),
                          ("HTTP_ERROR", "History op 'events' failed (502)"))
         with self.assertRaises(SynthigyError) as cm:
-            c.subscribe(["m-1"])
+            c._call("_subscribe", ["m-1"])
         self.assertEqual((cm.exception.code, cm.exception.message),
                          ("HTTP_ERROR", "Subscription set failed"))
 

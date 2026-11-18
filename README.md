@@ -192,14 +192,26 @@ w2.ready(); print(w2.first())
 
 Lower-level: `watch(interest)` (records/entities/relations, shaped
 record/relation deltas with computed `changed`), `watch_schema()`,
-`listen()` (raw SSE envelopes), `observe(descriptor, backfill=True)`
-(one-call subscribe + reconnect + `/history` gap replay). One SSE
-connection per client — all watches fuse onto it. `keep_alive=True` on
-connect pins the SSE open across watch churn (BFFs).
+`listen()` (raw SSE envelopes). One SSE connection per client — all
+watches fuse onto it, and the client posts their union as that stream's
+subscription set (engine 0.5.4+ keeps one set per stream). After a
+reconnect every watch gets `{"type": "connection/resumed"}`, and live
+queries re-run. `keep_alive=True` on connect pins the SSE open across
+watch churn (BFFs).
 
-Raw subscription calls (`subscribe`/`set_subscriptions`/...) exist but the
-server set is per-identity **full-replace** — raw calls clobber a live
-watch multiplexer's union. Prefer the watch family.
+`watch({"records": [...]}, backfill=True)` replays the record events missed
+during a reconnect from `/history` (one query per watched record, at most
+`backfill_limit=1000` rows each, marked `"fromBackfill": True`) before
+`connection/resumed`; live events that arrive meanwhile follow it.
+
+```python
+w = synthigy.watch({"records": [xid]}, backfill=True)
+for ev in w.events():
+    apply(ev)
+```
+
+`subscriptions()` shows the set the engine holds for this client's stream;
+declare interest with the watch family.
 
 ## History
 

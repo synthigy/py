@@ -106,6 +106,21 @@ class TestQueryWatch(WatchTestCase):
         self.assertEqual(body["xsql"], "@search _q\nmovie\n  title\n")
         self.assertEqual(body["params"], {"p": 1})
 
+    def test_reconnect_reruns_the_query(self):
+        rows1 = [{"xid": "m-1", "title": "A"}]
+        rows2 = [{"xid": "m-1", "title": "B"}]
+        self.srv.route("/data", (200, ok_results(rows1)),
+                       (200, ok_results(rows1)), (200, ok_results(rows2)))
+        qw = self.client().watch_query("movie", {}, {"title": None})
+        self.addCleanup(qw.close)
+        qw.ready(timeout=5)
+        q = pump(qw.events())
+        self.chan.drop()
+        self.assertEqual(q.get(timeout=5)["type"], "connection/resumed")
+        ev = q.get(timeout=5)
+        self.assertEqual((ev["type"], ev["record"]),
+                         ("query/changed", {"xid": "m-1", "title": "B"}))
+
     def test_bootstrap_error_surfaces_in_ready(self):
         self.srv.route("/data", (200, {"results": [{
             "ok": False, "error": {"message": "nope",
@@ -151,6 +166,19 @@ class TestSqlTemplateWatch(WatchTestCase):
         self.assertEqual(stw.value(), [{"n": 2}])
         self.assertEqual(stw.first(), {"n": 2})
 
+    def test_reconnect_reruns_the_sql(self):
+        self.srv.route("/data", (200, ok_results([{"n": 1}])),
+                       (200, ok_results([{"n": 1}])), (200, ok_results([{"n": 2}])))
+        stw = self.client().watch_sql_template(
+            "SELECT COUNT(*) AS n FROM {movie}", entities=["movie"])
+        self.addCleanup(stw.close)
+        stw.ready(timeout=5)
+        q = pump(stw.events())
+        self.chan.drop()
+        self.assertEqual(q.get(timeout=5)["type"], "connection/resumed")
+        ev = q.get(timeout=5)
+        self.assertEqual((ev["type"], ev["after"]), ("result/changed", [{"n": 2}]))
+
     def test_identical_result_not_emitted(self):
         self.srv.route("/data", (200, ok_results([{"n": 1}])))
         c = self.client()
@@ -184,6 +212,16 @@ class TestSqlTemplateWatch(WatchTestCase):
 
 
 class TestModuleVerbs(WatchTestCase):
+    def test_raw_subscription_calls_are_not_public(self):
+        from synthigy.async_client import AsyncClient
+        from synthigy.facade import Client
+        for name in ("observe", "subscribe", "unsubscribe", "subscribe_model",
+                     "unsubscribe_model", "set_subscriptions", "clear_subscriptions"):
+            for surface in (synthigy, Client, AsyncClient):
+                self.assertFalse(hasattr(surface, name), f"{surface.__name__}.{name}")
+        for surface in (synthigy, Client, AsyncClient):
+            self.assertTrue(hasattr(surface, "subscriptions"))
+
     def test_watch_verbs_delegate_to_default_client(self):
         synthigy.connect(self.srv.endpoint, token="tok")
         self.addCleanup(synthigy.disconnect)

@@ -4,6 +4,7 @@ subscription/set POST per client), exercised through the blocking facade
 Client (the "sync callers see no change" contract over the async engine)."""
 
 import asyncio
+import gc
 import json
 import queue
 import threading
@@ -408,6 +409,15 @@ class TestFusion(WatchTestCase):
         self.assertEqual(subs[3], {"type": "runtime-model"})
         w.close()
 
+    def test_a_watch_on_every_op_keeps_the_filter_off(self):
+        c = self.client()
+        w1 = c.watch({"records": ["r-1"], "ops": ["insert"]})
+        self.wait_set_post(lambda items: items and items[0].get("operations") == ["insert"])
+        w2 = c.watch({"records": ["r-2"]})
+        subs = self.wait_set_post(lambda items: items and items[0].get("records") == ["r-1", "r-2"])
+        self.assertNotIn("operations", subs[0])
+        w1.close(); w2.close()
+
     def test_add_widens_interest_and_reflushes(self):
         c = self.client()
         w = c.watch({"records": ["a-1"]})
@@ -493,6 +503,413 @@ class TestEndToEnd(WatchTestCase):
         self.assertEqual(q2.get(timeout=5)["record"], "r-1")
         w.close()
 
+
+
+GONE = (400, {"error": {"message": "gone", "code": "STREAM_NOT_FOUND"}})
+
+
+class TestStreams(WatchTestCase):
+    def test_every_post_names_the_open_stream(self):
+        c = self.client()
+        w = c.watch({"records": ["a-1"]})
+        q = pump(w.events())
+        self.wait_set_post(lambda items: any(
+            i.get("records") == ["a-1"] for i in items))
+        self.chan.drop()
+        self.assertEqual(q.get(timeout=5)["type"], "connection/resumed")
+        wait_until(lambda: len(self.set_bodies()) >= 2)
+        streams = [r["path"].partition("?stream=")[2]
+                   for r in self.srv.requests_to("/data/events")][:2]
+        self.assertEqual([b.get("stream") for b in self.set_bodies()[:2]],
+                         streams)
+        self.assertNotEqual(streams[0], streams[1])
+        w.close()
+
+    def test_a_closed_stream_is_not_a_rejection(self):
+        self.srv.route("/data/subscription/set", GONE, (200, {"ok": True}))
+        c = self.client()
+        w = c.watch({"records": ["a-1"]})
+        q = pump(w.events())
+        wait_until(lambda: len(self.set_bodies()) == 1)
+        time.sleep(0.1)
+        self.assertTrue(q.empty())
+        self.assertIsNone(w._aw._client._mux._stream_id)
+        self.assertFalse(w._aw._subscribed.is_set())
+        self.chan.drop()
+        self.assertEqual(q.get(timeout=5)["type"], "connection/resumed")
+        wait_until(lambda: len(self.set_bodies()) == 2)
+        self.assertEqual(self.set_bodies()[1]["subscriptions"][0]["records"],
+                         ["a-1"])
+        wait_until(lambda: w._aw._subscribed.is_set())
+        w.close()
+
+
+    def test_a_post_that_outlives_its_stream_waits_for_the_next_open(self):
+        post_gate, open_gate = threading.Event(), threading.Event()
+        sse = self.chan.handler()
+
+        def events(h):
+            if self.chan.connections >= 1:
+                open_gate.wait(5)
+            sse(h)
+
+        def subs(h):
+            if len(self.set_bodies()) == 2:
+                post_gate.wait(5)
+            h._respond(200, {"ok": True})
+
+        self.srv.route("/data/events", events)
+        self.srv.route("/data/subscription/set", subs)
+        c = self.client()
+        w1 = c.watch({"records": ["a-1"]})
+        pump(w1.events())
+        mux = w1._aw._client._mux
+        wait_until(lambda: w1._aw._subscribed.is_set())
+        w2 = queue.Queue()
+        threading.Thread(target=lambda: w2.put(c.watch({"records": ["b-2"]})),
+                         daemon=True).start()
+        wait_until(lambda: len(self.set_bodies()) == 2)
+        self.chan.drop()
+        wait_until(lambda: mux._stream_id is None)
+        post_gate.set()
+        w2 = w2.get(timeout=5)
+        time.sleep(0.2)
+        self.assertFalse(w2._aw._subscribed.is_set())
+        open_gate.set()
+        wait_until(lambda: len(self.set_bodies()) == 3)
+        wait_until(lambda: w2._aw._subscribed.is_set())
+        w2.close()
+        w1.close()
+
+    def test_nothing_is_posted_between_streams(self):
+        c = self.client()
+        w1 = c.watch({"records": ["a-1"]})
+        w2 = c.watch({"records": ["b-2"]})
+        self.wait_set_post(lambda items: any(
+            i.get("records") == ["a-1", "b-2"] for i in items))
+        n = len(self.set_bodies())
+        self.srv.route("/data/events", (503, {"error": {"message": "down",
+                                                        "code": "HTTP_ERROR"}}))
+        self.chan.drop()
+        wait_until(lambda: len(self.srv.requests_to("/data/events")) >= 2)
+        w2.close()
+        time.sleep(0.2)
+        self.assertEqual(len(self.set_bodies()), n)
+        w1.close()
+
+
+def _fake_watch(records):
+    pushed = []
+    h = type("H", (), {})()
+    h.interest = {"records": records}
+    h._subscribed = asyncio.Event()
+    h._push = pushed.append
+    h.pushed = pushed
+    return h
+
+
+class _SubsClient:
+    def __init__(self, on_post=None):
+        self.posts = []
+        self.on_post = on_post
+
+    async def _set_subscriptions(self, items, *, stream=None):
+        self.posts.append(stream)
+        if self.on_post:
+            self.on_post(stream)
+
+
+class TestMuxStreamId(unittest.TestCase):
+    def run_mux(self, on_post, stream):
+        async def run():
+            client = _SubsClient()
+            mux = synthigy.async_client.AsyncWatchMultiplexer(client, schema=False)
+            client.on_post = on_post and (lambda s: on_post(mux, s))
+            mux._stream_id = stream
+            h = _fake_watch(["a-1"])
+            mux._watches.add(h)
+            await mux._flush_safe()
+            return mux, client, h
+        return asyncio.run(run())
+
+    def test_no_stream_no_post(self):
+        mux, client, h = self.run_mux(None, None)
+        self.assertEqual(client.posts, [])
+        self.assertFalse(h._subscribed.is_set())
+        self.assertIsNone(mux._last_union)
+
+    def test_post_names_the_stream_and_records_the_union(self):
+        mux, client, h = self.run_mux(None, "s-1")
+        self.assertEqual(client.posts, ["s-1"])
+        self.assertTrue(h._subscribed.is_set())
+        self.assertIsNotNone(mux._last_union)
+
+    def test_refusal_of_the_current_stream_clears_it(self):
+        def gone(mux, s):
+            raise SynthigyError("gone", "STREAM_NOT_FOUND", status=400)
+        mux, client, h = self.run_mux(gone, "s-1")
+        self.assertIsNone(mux._stream_id)
+        self.assertEqual(h.pushed, [])
+        self.assertFalse(h._subscribed.is_set())
+        self.assertIsNone(mux._last_union)
+
+    def test_an_old_streams_refusal_keeps_the_new_stream(self):
+        def gone(mux, s):
+            mux._stream_id = "s-new"
+            raise SynthigyError("gone", "STREAM_NOT_FOUND", status=400)
+        mux, client, h = self.run_mux(gone, "s-old")
+        self.assertEqual(mux._stream_id, "s-new")
+        self.assertEqual(h.pushed, [])
+
+    def test_a_union_posted_to_an_old_stream_is_not_recorded(self):
+        def moved(mux, s):
+            mux._stream_id = "s-new"
+        mux, client, h = self.run_mux(moved, "s-old")
+        self.assertIsNone(mux._last_union)
+        self.assertFalse(h._subscribed.is_set())
+
+    def test_a_post_whose_stream_ended_settles_nothing(self):
+        def ended(mux, s):
+            mux._stream_id = None
+        mux, client, h = self.run_mux(ended, "s-1")
+        self.assertEqual(client.posts, ["s-1"])
+        self.assertIsNone(mux._last_union)
+        self.assertFalse(h._subscribed.is_set())
+
+    def test_an_unchanged_union_without_a_stream_marks_nothing(self):
+        async def run():
+            client = _SubsClient()
+            mux = synthigy.async_client.AsyncWatchMultiplexer(client, schema=False)
+            mux._stream_id = "s-1"
+            mux._watches.add(_fake_watch(["a-1"]))
+            await mux._flush_safe()
+            mux._stream_id = None
+            late = _fake_watch(["a-1"])
+            mux._watches.add(late)
+            await mux._flush_safe()
+            return client, late
+        client, late = asyncio.run(run())
+        self.assertEqual(client.posts, ["s-1"])
+        self.assertFalse(late._subscribed.is_set())
+
+    def test_an_unchanged_union_after_stream_not_found_marks_nothing(self):
+        async def run():
+            client = _SubsClient()
+            mux = synthigy.async_client.AsyncWatchMultiplexer(client, schema=False)
+            mux._stream_id = "s-1"
+            h = _fake_watch(["a-1"])
+            mux._watches.add(h)
+            await mux._flush_safe()
+
+            def gone(stream):
+                raise SynthigyError("gone", "STREAM_NOT_FOUND", status=400)
+            client.on_post = gone
+            h.interest = {"records": ["a-1", "b-2"]}
+            await mux._flush_safe()
+            h.interest = {"records": ["a-1"]}
+            late = _fake_watch(["a-1"])
+            mux._watches.add(late)
+            await mux._flush_safe()
+            return client, late
+        client, late = asyncio.run(run())
+        self.assertEqual(client.posts, ["s-1", "s-1"])
+        self.assertFalse(late._subscribed.is_set())
+
+
+async def _drain(it):
+    return [ev async for ev in it]
+
+
+class TestFatal(WatchTestCase):
+    def test_a_refusal_during_a_replay_still_reaches_the_watch(self):
+        async def run():
+            mux = synthigy.async_client.AsyncWatchMultiplexer(_SubsClient(),
+                                                               schema=False)
+            h = synthigy.async_client.AsyncWatchHandle(None, {"records": ["r-1"]})
+            h._replaying = []
+            h._replay_task = asyncio.ensure_future(asyncio.sleep(10))
+            mux._watches.add(h)
+            mux._fatal(SynthigyError("no", "FORBIDDEN", status=403))
+            return [ev async for ev in h]
+        got = asyncio.run(run())
+        self.assertEqual([e["type"] for e in got], ["subscription/rejected"])
+        self.assertEqual(got[0]["error"].code, "FORBIDDEN")
+
+    def test_events_opened_after_a_refusal_get_it_and_end(self):
+        async def run():
+            mux = synthigy.async_client.AsyncWatchMultiplexer(_SubsClient(),
+                                                               schema=False)
+            h = synthigy.async_client.AsyncWatchHandle(None, {"records": ["r-1"]})
+            mux._watches.add(h)
+            mux._fatal(SynthigyError("no", "FORBIDDEN", status=403))
+            return await asyncio.wait_for(
+                asyncio.gather(*([_drain(h.events()) for _ in range(2)])), 2)
+        got = asyncio.run(run())
+        self.assertEqual([[e["type"] for e in evs] for evs in got],
+                         [["subscription/rejected"]] * 2)
+
+    def test_a_watch_after_a_refused_stream_opens_a_new_one(self):
+        sse = self.chan.handler()
+        calls = []
+
+        def events(h):
+            calls.append(1)
+            if len(calls) == 1:
+                h._respond(403, {"error": REJECTION})
+            else:
+                sse(h)
+        self.srv.route("/data/events", events)
+        c = self.client()
+        w1 = c.watch({"records": ["a-1"]})
+        q = pump(w1.events())
+        self.assertEqual(q.get(timeout=5)["type"], "subscription/rejected")
+        w2 = c.watch({"records": ["b-2"]})
+        self.wait_set_post(lambda items: any(
+            "b-2" in i.get("records", []) for i in items))
+        self.assertEqual(len(calls), 2)
+        w2.close()
+
+    def test_a_watch_after_a_refusal_posts_only_its_own_interest(self):
+        sse = self.chan.handler()
+        calls = []
+
+        def events(h):
+            calls.append(1)
+            if len(calls) == 1:
+                h._respond(403, {"error": REJECTION})
+            else:
+                sse(h)
+        self.srv.route("/data/events", events)
+        c = self.client()
+        w1 = c.watch({"records": ["a-1"]})
+        q = pump(w1.events())
+        self.assertEqual(q.get(timeout=5)["type"], "subscription/rejected")
+        w2 = c.watch({"records": ["b-2"]})
+        items = self.wait_set_post(lambda items: any(
+            "b-2" in i.get("records", []) for i in items))
+        self.assertEqual([i.get("records") for i in items
+                          if i.get("type") == "data"], [["b-2"]])
+        w1.close()
+        w2.close()
+
+    def test_fatal_drops_ended_watches_and_a_later_close_is_harmless(self):
+        async def run():
+            mux = synthigy.async_client.AsyncWatchMultiplexer(_SubsClient(),
+                                                               schema=False)
+            client = type("C", (), {"_mux": mux})()
+            h = synthigy.async_client.AsyncWatchHandle(client, {"records": ["r-1"]})
+            h._registered = True
+            sw = synthigy.async_client.AsyncSchemaWatch(client)
+            mux._watches.add(h)
+            mux._schema_watches.add(sw)
+            mux._fatal(SynthigyError("no", "FORBIDDEN", status=403))
+            await h.close()
+            await sw.close()
+            return mux
+        mux = asyncio.run(run())
+        self.assertEqual(mux._watches, set())
+        self.assertEqual(mux._schema_watches, set())
+        self.assertIsNone(mux._flush_pending)
+
+    def test_a_replaced_refused_task_logs_no_unretrieved_exception(self):
+        class Refused(_SubsClient):
+            _endpoint = "http://unused"
+            _timeout = 1
+            _token_manager = None
+
+            async def _token(self):
+                raise SynthigyError("no", "FORBIDDEN", status=403)
+
+        async def run():
+            seen = []
+            asyncio.get_running_loop().set_exception_handler(
+                lambda loop, ctx: seen.append(ctx.get("message")))
+            mux = synthigy.async_client.AsyncWatchMultiplexer(Refused(),
+                                                               schema=False)
+            mux._ensure_task()
+            await asyncio.wait([mux._task])
+            mux._ensure_task()
+            await asyncio.wait([mux._task])
+            mux._task.exception()
+            mux._task = None
+            gc.collect()
+            await asyncio.sleep(0)
+            return seen
+        seen = asyncio.run(run())
+        self.assertFalse([m for m in seen
+                          if m and "never retrieved" in m], seen)
+
+
+class TestBackfill(WatchTestCase):
+    def history(self, rows, delay=0.0, status=200):
+        def handle(h):
+            body = json.loads(h.request_body)
+            time.sleep(delay)
+            xid = body["opts"].get("record-xid")
+            h._respond(status, {"result": [r for r in rows
+                                           if r["record-xid"] == xid]})
+        self.srv.route("/history", handle)
+
+    def watch_until_gap(self, live_after_drop=None):
+        c = self.client()
+        w = c.watch({"records": ["r-1", "r-2"], "ops": ["update"]},
+                    backfill=True, backpressure="lossless")
+        q = pump(w.events())
+        self.wait_set_post(lambda items: any(
+            i.get("records") == ["r-1", "r-2"] for i in items))
+        self.chan.send({"type": "record/update", "record-xid": "r-1",
+                        "ts": "t1", "after": {"title": "A"}})
+        self.assertEqual(q.get(timeout=5)["ts"], "t1")
+        self.chan.drop()
+        if live_after_drop:
+            self.chan.send(live_after_drop)
+        self.addCleanup(w.close)
+        return q
+
+    ROWS = [
+        {"record-xid": "r-1", "op": "change", "ts": "t1",
+         "attribute-xid": "a-title", "value": "A"},
+        {"record-xid": "r-1", "op": "change", "ts": "t2",
+         "attribute-xid": "a-title", "value": "B"},
+        {"record-xid": "r-2", "op": "insert", "ts": "t2",
+         "attribute-xid": "a-title", "value": "N"},
+        {"record-xid": "r-2", "op": "change", "ts": "t3",
+         "attribute-xid": "a-title", "value": "M"},
+    ]
+
+    def test_replays_the_gap_per_record_before_the_sentinel(self):
+        self.history(self.ROWS)
+        q = self.watch_until_gap()
+        got = [q.get(timeout=5) for _ in range(3)]
+        self.assertEqual([(e["type"], e.get("record"), e.get("ts")) for e in got],
+                         [("record/update", "r-1", "t2"),
+                          ("record/update", "r-2", "t3"),
+                          ("connection/resumed", None, None)])
+        self.assertEqual(got[0]["after"], {"title": "B"})
+        self.assertTrue(got[0]["fromBackfill"])
+        opts = [json.loads(r["body"])["opts"]
+                for r in self.srv.requests_to("/history")]
+        self.assertEqual(sorted(o["record-xid"] for o in opts), ["r-1", "r-2"])
+        self.assertTrue(all(o["between"][0] == "t1" and o["track"] == "entity"
+                            and o["limit"] == 1000 for o in opts))
+
+    def test_live_events_during_the_replay_come_after_it(self):
+        self.history(self.ROWS, delay=0.3)
+        q = self.watch_until_gap({"type": "record/update", "record-xid": "r-1",
+                                  "ts": "t4", "after": {"title": "L"}})
+        got = [q.get(timeout=5) for _ in range(4)]
+        self.assertEqual([(e["type"], e.get("ts")) for e in got],
+                         [("record/update", "t2"), ("record/update", "t3"),
+                          ("connection/resumed", None), ("record/update", "t4")])
+        self.assertNotIn("fromBackfill", got[3])
+
+    def test_a_failed_history_still_delivers_the_sentinel_and_held_events(self):
+        self.history([], delay=0.3, status=500)
+        q = self.watch_until_gap({"type": "record/update", "record-xid": "r-1",
+                                  "ts": "t4", "after": {"title": "L"}})
+        got = [q.get(timeout=5) for _ in range(2)]
+        self.assertEqual([(e["type"], e.get("ts")) for e in got],
+                         [("connection/resumed", None), ("record/update", "t4")])
 
 
 REJECTION = {"message": "no", "code": "FORBIDDEN", "hint": "h",

@@ -17,6 +17,7 @@ import queue
 import threading
 import time
 import unittest
+from unittest import mock
 
 import synthigy.async_client
 from synthigy import Client, SynthigyError
@@ -435,6 +436,104 @@ class TestWritesAndBatch(AsyncSpikeTestCase):
 
         asyncio.run(run())
 
+    def test_503_server_busy_is_retryable(self):
+        self.srv.route("/data", (503, {"error": {
+            "message": "busy", "code": "SERVER_BUSY", "retryable": True}}))
+
+        @mock.patch("synthigy.async_client.busy_delay", return_value=0)
+        async def run(_delay):
+            client = AsyncClient(self.srv.endpoint, token="tok")
+            try:
+                with self.assertRaises(SynthigyError) as cm:
+                    await client.search("movie")
+                e = cm.exception
+                self.assertEqual((e.code, e.category, e.retryable, e.status),
+                                 ("SERVER_BUSY", "rate_limit", True, 503))
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+
+    def test_a_call_deadline_ends_the_busy_wait(self):
+        self.srv.route("/data", (503, {"error": {
+            "message": "busy", "code": "SERVER_BUSY", "retryable": True}}))
+
+        @mock.patch("synthigy.async_client.busy_delay", return_value=60)
+        async def run(_delay):
+            client = AsyncClient(self.srv.endpoint, token="tok")
+            try:
+                started = time.monotonic()
+                with self.assertRaises(SynthigyError) as cm:
+                    await client.search("movie", timeout=0.2)
+                self.assertEqual(cm.exception.code, "SERVER_BUSY")
+                self.assertLess(time.monotonic() - started, 5)
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+        self.assertEqual(len(self.srv.requests_to("/data")), 1)
+
+    def test_a_longer_call_timeout_allows_the_busy_wait(self):
+        self.srv.route("/data", (503, {"error": {"message": "busy", "code": "SERVER_BUSY"}}),
+                       (200, ok_results([])))
+
+        @mock.patch("synthigy.async_client.busy_delay", return_value=0.3)
+        async def run(_delay):
+            client = AsyncClient(self.srv.endpoint, token="tok", timeout=0.2)
+            try:
+                self.assertEqual(await client.search("movie", timeout=5), [])
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+        self.assertEqual(len(self.srv.requests_to("/data")), 2)
+
+    def test_the_client_timeout_bounds_the_busy_wait(self):
+        self.srv.route("/data", (503, {"error": {"message": "busy", "code": "SERVER_BUSY"}}))
+
+        @mock.patch("synthigy.async_client.busy_delay", return_value=60)
+        async def run(_delay):
+            client = AsyncClient(self.srv.endpoint, token="tok", timeout=0.2)
+            try:
+                with self.assertRaises(SynthigyError) as cm:
+                    await client.search("movie")
+                self.assertEqual(cm.exception.code, "SERVER_BUSY")
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+        self.assertEqual(len(self.srv.requests_to("/data")), 1)
+
+    def test_a_busy_resend_only_gets_what_is_left_of_the_client_timeout(self):
+        calls = []
+
+        def handler(h):
+            calls.append(1)
+            if len(calls) == 1:
+                h._respond(503, {"error": {"message": "busy", "code": "SERVER_BUSY"}})
+                return
+            time.sleep(0.9)
+            try:
+                h._respond(200, ok_results([]))
+            except OSError:
+                pass
+
+        self.srv.route("/data", handler)
+
+        @mock.patch("synthigy.async_client.busy_delay", return_value=0.6)
+        async def run(_delay):
+            client = AsyncClient(self.srv.endpoint, token="tok", timeout=1.0)
+            try:
+                started = time.monotonic()
+                with self.assertRaises(SynthigyError) as cm:
+                    await client.search("movie")
+                self.assertEqual(cm.exception.code, "NETWORK_ERROR")
+                self.assertLess(time.monotonic() - started, 1.3)
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+
     def test_destroy_answers_true_on_null_data(self):
         self.srv.route("/data", (200, ok_results(None)))
 
@@ -719,7 +818,7 @@ class TestSchemaTracking(AsyncSpikeTestCase):
         asyncio.run(run())
 
 
-class TestAsyncListenObserve(AsyncSpikeTestCase):
+class TestAsyncListen(AsyncSpikeTestCase):
     def test_listen_open_sentinel_and_reconnect_resume(self):
         ev1 = {"type": "record/update", "record-xid": "u-1"}
         ev2 = {"type": "record/update", "record-xid": "u-2"}
@@ -750,41 +849,15 @@ class TestAsyncListenObserve(AsyncSpikeTestCase):
         self.assertNotIn("last-event-id", h0)
         self.assertEqual(h1["last-event-id"], "41")
 
-    def test_observe_filters_resubscribes_and_cleans_up(self):
-        from contextlib import aclosing
-        match = {"type": "record/update", "record-xid": "u-1", "ts": "t1"}
-        other = {"type": "record/update", "record-xid": "other"}
-        heartbeat = {"type": "heartbeat"}  # not slash-typed → skipped
-        self.srv.route("/data/events", sse_handler(
-            [data_frame(other) + data_frame(heartbeat) + data_frame(match)]))
-
-        async def run():
-            client = AsyncClient(self.srv.endpoint, token="tok")
-            try:
-                async with aclosing(client.observe(["u-1", "u-9"])) as events:
-                    async for ev in events:
-                        self.assertEqual(ev, match)
-                        break
-                # aclosing ran the cleanup → empty set POSTed
-                await self.await_set_post(lambda items: items == [])
-            finally:
-                await client.close()
-
-        asyncio.run(run())
-        bodies = self.set_bodies()
-        self.assertEqual(bodies[0]["subscriptions"][0]["records"],
-                         ["u-1", "u-9"])
-
-
 class TestAsyncSubscriptions(AsyncSpikeTestCase):
     def test_subscribe_bodies_and_full_replace(self):
         async def run():
             client = AsyncClient(self.srv.endpoint, token="tok")
             try:
-                await client.subscribe(["b-2", "a-1"])
+                await client._subscribe(["b-2", "a-1"])
                 self.assertEqual(self.set_bodies()[-1], {"subscriptions": [
                     {"type": "data", "records": ["a-1", "b-2"]}]})
-                await client.set_subscriptions([
+                await client._set_subscriptions([
                     {"type": "entity", "entities": ["movie"]},
                     {"type": "runtime-model"}])
                 items = self.set_bodies()[-1]["subscriptions"]
@@ -792,13 +865,13 @@ class TestAsyncSubscriptions(AsyncSpikeTestCase):
                                  {"type": "entity", "entities": ["movie"]})
                 self.assertEqual(items[1], {"type": "runtime-model"})
                 n = len(self.set_bodies())
-                out = await client.unsubscribe(["zzz"])
+                out = await client._unsubscribe(["zzz"])
                 self.assertEqual(out, {"ok": True})
                 self.assertEqual(len(self.set_bodies()), n)  # no extra POST
-                await client.clear_subscriptions()
+                await client._clear_subscriptions()
                 self.assertEqual(self.set_bodies()[-1], {"subscriptions": []})
                 with self.assertRaises(SynthigyError) as cm:
-                    await client.subscribe("User")   # legacy firehose form
+                    await client._subscribe("User")   # legacy firehose form
                 self.assertEqual(cm.exception.code, "INVALID_SUBSCRIPTION")
             finally:
                 await client.close()
