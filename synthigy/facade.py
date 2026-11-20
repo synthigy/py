@@ -181,6 +181,15 @@ class Client:
     def purge(self, *a, **kw):
         return self._call("purge", *a, **kw)
 
+    def claim(self, *a, **kw):
+        return self._call("claim", *a, **kw)
+
+    def renew(self, *a, **kw):
+        return self._call("renew", *a, **kw)
+
+    def release(self, *a, **kw):
+        return self._call("release", *a, **kw)
+
     def exec_(self, *a, **kw):
         return self._call("exec_", *a, **kw)
 

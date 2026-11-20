@@ -47,6 +47,15 @@ def purge(entity, args, selection=None):
             "selections": normalize_selection(selection)}
 
 
+def claim(entity, args, selection=None):
+    return {"op": "claim", "entity": entity, "args": args,
+            "selections": normalize_selection(selection)}
+
+
+def release(entity, data):
+    return {"op": "release", "entity": entity, "data": data}
+
+
 def search_tree(entity, on, args=None, selection=None):
     return {"op": "search-tree", "entity": entity, "on": on, "args": args,
             "selections": normalize_selection(selection)}

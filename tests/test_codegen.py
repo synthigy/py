@@ -164,6 +164,38 @@ class TestFailLoud(unittest.TestCase):
         self.assertIn("skipped @sync save", buf.getvalue())
         self.assertNotIn("def save", code)
 
+    def test_claim_generates_and_release_skips(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            code = self.render_ops([
+                {"name": "grab", "op": "claim", "entity": "job",
+                 "source": "@claim grab\njob (limit 1)\n  xid", "params": [],
+                 "result": {"fields": []}},
+                {"name": "free", "op": "release", "entity": "job",
+                 "source": "@release free\n?ids:job[]"}])
+        self.assertIn("def grab", code)
+        self.assertNotIn("def free", code)
+        self.assertIn("skipped @release free — use client.release('job', xids)", buf.getvalue())
+
+    def test_slice_returns_map_and_purge_returns_rows(self):
+        code = self.render_ops([
+            {"name": "cut", "op": "slice", "entity": "movie",
+             "source": "movie (xid = ?xid)\n  actors", "params": [],
+             "result": {"fields": [{"key": "actors", "kind": "relation",
+                                    "fields": []}]}},
+            {"name": "wipe", "op": "purge", "entity": "movie",
+             "source": "movie (limit 1)\n  xid", "params": [],
+             "result": {"fields": [{"key": "xid", "type": "uuid"}]}}])
+        self.assertIn("-> dict[str, bool]:", code)
+        self.assertIn("op='slice', acting_as=acting_as, timeout=timeout) or {}", code)
+        self.assertNotIn("MovieCutRow", code)
+        self.assertIn("def wipe(", code)
+        self.assertIn("-> list[MovieWipeRow]:", code)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "gen.py"
+            p.write_text(code)
+            py_compile.compile(str(p), doraise=True)
+
     def test_sql_template_without_namespace_is_fatal(self):
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             self.render_ops([{"name": "raw", "op": "sql-template",

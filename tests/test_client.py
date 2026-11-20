@@ -220,6 +220,32 @@ class TestEnvelope(ClientTestCase):
         c.delete("User", {"xid": "u-1"})
         self.assertEqual(self.last_data_body()["operations"][0]["op"], "delete")
 
+    def test_claim_renew_release(self):
+        self.srv.route("/data", (200, ok_results([{"xid": "j-1"}])))
+        c = self.static_client()
+        self.assertEqual(c.claim("Job", {"_limit": 2}, ["xid"], acting_as="u-1", key_format="camel"),
+                         [{"xid": "j-1"}])
+        body = self.last_data_body()
+        self.assertEqual((body["acting_as"], body["key_format"]), ("u-1", "camel"))
+        self.assertEqual(body["operations"][0], {"op": "claim", "entity": "Job", "args": {"_limit": 2},
+                                                 "selections": {"xid": None}})
+        c.renew("Job", ["j-1", "j-2"], acting_as="u-1")
+        body = self.last_data_body()
+        self.assertEqual(body["acting_as"], "u-1")
+        self.assertEqual(body["operations"][0], {"op": "claim", "entity": "Job",
+                                                 "args": {"xid": {"_in": ["j-1", "j-2"]}, "_limit": 2},
+                                                 "selections": {"xid": None}})
+        n = len(self.srv.requests_to("/data"))
+        self.assertEqual(c.renew("Job", []), [])
+        self.assertEqual(len(self.srv.requests_to("/data")), n, "no call for no xids")
+        self.srv.route("/data", (200, ok_results(1)))
+        self.assertEqual(c.release("Job", ["j-1"], acting_as="u-1"), 1)
+        self.assertEqual(self.last_data_body()["operations"][0], {"op": "release", "entity": "Job", "data": ["j-1"]})
+        self.srv.route("/data", (200, {"results": [{"ok": False, "error": {"code": "RECORD_LOCKED", "message": "held"}}]}))
+        with self.assertRaises(SynthigyError) as e:
+            c.release("Job", ["j-1"])
+        self.assertEqual(e.exception.code, "RECORD_LOCKED")
+
     def test_deploy_posts_export_contents_verbatim(self):
         self.srv.route("/data", (200, ok_results(
             {"deployed": True, "version": "0.3", "dataset": "ds-1"})))

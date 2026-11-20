@@ -59,8 +59,8 @@ PY_SCALAR = {
     "order": "str",
 }
 
-READ_VERBS = {"search", "get", "slice", "purge"}   # XSQL = read/destroy only
-MUTATE_VERBS = {"sync", "stack", "delete"}          # schema-derived, never XSQL
+READ_VERBS = {"search", "get", "slice", "purge", "claim"}
+MUTATE_VERBS = {"sync", "stack", "delete"}
 KNOWN_VERBS = READ_VERBS | {"sql-template"}
 
 
@@ -148,6 +148,10 @@ def _validate_ops(operations):
             raise CodegenError(
                 f"operation {o.get('name')!r} has an empty op kind — the IR "
                 "is stale or corrupt; re-run: python3 -m synthigy.codegen gen")
+        if verb == "release":
+            print(f"skipped @release {o.get('name')} — use "
+                  f"client.release({o.get('entity') or '<entity>'!r}, xids)", file=sys.stderr)
+            continue
         if verb in MUTATE_VERBS:
             print(f"skipped @{verb} {o.get('name')} — mutations are generated "
                   f"from the schema; use sync_{o.get('entity') or '<entity>'}"
@@ -299,7 +303,9 @@ def _emit_method(op, src, params_t, row_t):
     known = [p["name"] for p in op.get("params") or []]
     sig, ppass = _params_sig(params_t, all_opt, known, name)
     wsig, _ = _params_sig(params_t, all_opt, known, name, WATCH_OPTS)
-    ret = f"{row_t} | None" if verb == "get" else f"list[{row_t}]"
+    ret = ("dict[str, bool]" if verb == "slice" else
+           f"{row_t} | None" if verb == "get" else f"list[{row_t}]")
+    tail = " or {}" if verb == "slice" else ""
 
     lines = ["    @staticmethod", f"    def {name}({sig}) -> {ret}:"]
     if op.get("description"):
@@ -308,7 +314,7 @@ def _emit_method(op, src, params_t, row_t):
         lines.append(f"        return synthigy.sql_template({src}, {ppass}, {CALL_PASS})")
     else:
         lines.append(f"        return synthigy.query({src}, {ppass}, "
-                     f"op={verb!r}, {CALL_PASS})")
+                     f"op={verb!r}, {CALL_PASS}){tail}")
     chunks = ["\n".join(lines)]
 
     alines = ["    @staticmethod", f"    async def {name}({sig}) -> {ret}:"]
@@ -318,8 +324,8 @@ def _emit_method(op, src, params_t, row_t):
         alines.append("        return await synthigy.aclient().sql_template("
                       f"{src}, {ppass}, {CALL_PASS})")
     else:
-        alines.append("        return await synthigy.aclient().query("
-                      f"{src}, {ppass}, op={verb!r}, {CALL_PASS})")
+        alines.append("        return (await synthigy.aclient().query("
+                      f"{src}, {ppass}, op={verb!r}, {CALL_PASS})){tail}")
     achunks = ["\n".join(alines)]
 
     if op.get("watch"):
@@ -428,8 +434,8 @@ def _params(params: Any, known: list[str], op: str) -> dict:
 
 _BATCH_HELPER = '''\
 def _batch_result(result: dict, op: str) -> Any:
-    """Per-member unwrap: ok → data (get → record|None, else → list);
-    error → a SynthigyError VALUE (the batch itself never raises)."""
+    """Per-member unwrap: ok → data (get → record|None, slice → dict,
+    else → list); error → a SynthigyError VALUE (the batch itself never raises)."""
     if not result.get("ok"):
         return error_from_server({"message": "operation failed",
                                   "code": "OPERATION_FAILED",
@@ -437,6 +443,8 @@ def _batch_result(result: dict, op: str) -> Any:
     data = result.get("data")
     if op == "get":
         return data
+    if op == "slice":
+        return data or {}
     return data if data is not None else []'''
 
 
@@ -600,7 +608,9 @@ def render(ir, schema=None, *, writes=True, input_name="<xsql>", regen=None):
         src_chunks.append(_emit_source(src, doc))
         params_t = _emit_params(f"{Type}Params", o.get("params"), type_chunks)
         result = o.get("result") or {}
-        if result.get("fields"):
+        if o["op"] == "slice":
+            row_t = None
+        elif result.get("fields"):
             row_t = _emit_rows(f"{Type}Row", result["fields"], type_chunks)
         else:   # sql-template without @returns → untyped rows
             row_t = f"{Type}Row"

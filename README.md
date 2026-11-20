@@ -148,6 +148,11 @@ synthigy.delete("movie", {"xid": xid})                                 # soft de
 `slice` (unlink without deleting) and `purge` (hard delete by filter) exist
 too.
 
+Record locks: `claim` locks up to `_limit` free matching rows to the caller
+and returns them, `renew` re-claims held rows by xid to extend the lease (a
+row missing from the answer is no longer held), `release` frees them. A lock
+guards only the row's own columns: delete, purge and links ignore it.
+
 **Writes are silent by default** — `sync`/`stack` answer `{"count": n}`, not
 the record. Mint the id up front when you need it; that is cheaper than the
 echo and makes a retried write idempotent rather than duplicating a row:

@@ -65,6 +65,7 @@ from .events import (
     normalize_descriptor, normalize_interest, shape_event,
 )
 from .login import REJECTING_LOGIN_STORE, AsyncLoginAPI
+from . import ops
 from .selection import normalize_selection
 from .util import (DEFAULT_TIMEOUT, generate_request_id, generate_stream_id,
                    now_iso, xsql_document)
@@ -1835,6 +1836,21 @@ class AsyncClient:
             {"op": "purge", "entity": entity, "args": args,
              "selections": normalize_selection(selection)},
             **opts)
+
+    async def claim(self, entity, args, selection=None, **opts):
+        """Lock up to args["_limit"] free matching records to the caller; held ones match too and get a new lease."""
+        return await self._one(ops.claim(entity, args, selection), **opts)
+
+    async def renew(self, entity, xids, selection=None, **opts):
+        """Extend the lease on held records; a record missing from the result is no longer held."""
+        if not xids:
+            return []
+        return await self.claim(entity, {"xid": {"_in": list(xids)}, "_limit": len(xids)},
+                                selection or ["xid"], **opts)
+
+    async def release(self, entity, data, **opts):
+        """Clear the caller's locks on records named by xids or a unique-key map; returns the count."""
+        return await self._one(ops.release(entity, data), **opts)
 
     # ── trees / models / introspection / history ───────────────────────
 
